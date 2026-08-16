@@ -31,7 +31,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--scenario", default=SCENARIOS[0].id, choices=list(BY_ID))
     parser.add_argument("--a", default="stubborn", choices=list(POLICIES), help="Robot A's policy")
-    parser.add_argument("--b", default="always_yield", choices=list(POLICIES), help="Robot B's policy")
+    parser.add_argument("--b", default="stubborn", choices=list(POLICIES), help="Robot B's policy")
     parser.add_argument("--max-turns", type=int, default=6)
     args = parser.parse_args()
 

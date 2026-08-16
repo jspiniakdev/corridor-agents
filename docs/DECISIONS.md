@@ -149,3 +149,34 @@ protocol exist.
 **Why:** LLM non-determinism means single runs are noise. Without seeded,
 repeated scenarios, every later "improvement" is unfalsifiable, and months can
 go into chasing phantoms.
+
+---
+
+## D8 — Force structured output for LLMPolicy instead of prompt + regex parsing
+
+**Decided:** `LLMPolicy` sends a forced tool call (`tool_choice={"type": "tool",
+"name": "respond"}`) with a JSON schema, instead of asking for JSON in the
+system prompt and regex/`json.loads`-parsing free text out of the reply. The
+schema's `goes_first` field is an enum built per call from the two real robot
+names in that negotiation, not a generic string.
+
+**Rejected:** the original approach — `SYSTEM` prompt instructing "reply with
+ONLY a JSON object," then `LLMPolicy._parse` pulling a `{...}` blob out of the
+raw text with regex, `json.loads`-ing it inside a try/except, and manually
+checking `goes_first` against the two known names to drop a hallucinated one.
+
+**Why:** the schema constrains the model's output at the API level instead of
+hoping the prompt is followed. Concretely: less code (no regex extraction, no
+JSON-decode try/except, no free-text fallback branch), and a hallucinated
+third robot name is no longer something to catch after the fact — it isn't a
+valid tool call in the first place, because the enum only contains the two
+robots actually in this negotiation.
+
+**What's kept anyway:** one defensive line in `_to_message` re-checking that
+`goes_first` is one of the two real names before trusting it. The schema
+should make a violation impossible, but there's no hard guarantee every
+constraint is enforced API-side, and the check costs nothing.
+
+**Would change our mind:** if a future policy needs genuinely free-form
+output (not a structured decision plus a `text` field alongside it), forced
+tool-use would need to loosen or go away for that policy.

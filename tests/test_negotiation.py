@@ -84,24 +84,25 @@ def test_ground_truth_is_never_shown_to_a_policy():
     assert str(S.a_urgency) not in prompt
 
 
-def test_llm_parse_handles_prose_wrapped_json():
+def test_llm_tool_schema_scopes_goes_first_to_this_negotiation():
     a, b = make(Stubborn, Stubborn)
-    msg = LLMPolicy._parse('Sure!\n{"intent":"propose","goes_first":"Robot B","text":"You go."}', a, b)
+    schema = LLMPolicy._tool(a.name, b.name)
+    assert schema["input_schema"]["properties"]["goes_first"]["enum"] == [a.name, b.name, None]
+
+
+def test_llm_builds_message_from_tool_input():
+    a, b = make(Stubborn, Stubborn)
+    msg = LLMPolicy._to_message(a, b, {"intent": "propose", "goes_first": "Robot B", "text": "You go."})
     assert msg.intent is Intent.PROPOSE
     assert msg.goes_first == "Robot B"
 
 
-def test_llm_parse_survives_garbage():
+def test_llm_drops_hallucinated_goes_first_name():
+    """Belt and suspenders: the schema's enum should make this impossible,
+    but a name outside this negotiation still must not be trusted."""
     a, b = make(Stubborn, Stubborn)
-    msg = LLMPolicy._parse("the corridor is blocked", a, b)
-    assert msg.intent is Intent.INFORM
+    msg = LLMPolicy._to_message(a, b, {"intent": "propose", "goes_first": "Robot Q", "text": "hi"})
     assert msg.goes_first is None
-
-
-def test_llm_parse_drops_hallucinated_names():
-    a, b = make(Stubborn, Stubborn)
-    msg = LLMPolicy._parse('{"intent":"propose","goes_first":"Robot Q","text":"hi"}', a, b)
-    assert msg.goes_first is None, "a name that isn't in the negotiation must not be trusted"
 
 
 def test_every_scenario_is_well_formed():

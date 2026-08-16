@@ -16,7 +16,6 @@ The two ideas from the plan that shape this file:
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
@@ -130,14 +129,10 @@ You are talking directly to {other} over a radio link.
 PRIVATE - {other} cannot see this unless you choose to say it:
 {situation}
 
-Reply with ONLY a JSON object, no other text:
-{{"intent": "inform|propose|accept|reject",
-  "goes_first": "{name}" or "{other}" or null,
-  "text": "one or two short sentences, spoken to {other}"}}
-
-Use "propose" to suggest who goes first, "accept" to agree to their standing
-proposal (set goes_first to the same value they used), "reject" to refuse.
-Talk like a machine in a hurry, not a chatbot."""
+Call the respond tool for your next message. Use "propose" to suggest who
+goes first, "accept" to agree to their standing proposal (set goes_first to
+the same value they used), "reject" to refuse. Talk like a machine in a
+hurry, not a chatbot."""
 
 
 class LLMPolicy:
@@ -154,6 +149,25 @@ class LLMPolicy:
 
             self._client = anthropic.Anthropic()
         return self._client
+
+    @staticmethod
+    def _tool(me_name: str, other_name: str) -> dict:
+        """A schema that forces the reply into our message shape. goes_first's
+        enum is built from this call's actual two robot names, so naming a
+        third robot isn't a valid tool call at all."""
+        return {
+            "name": "respond",
+            "description": "Send your next message in the corridor negotiation.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "intent": {"type": "string", "enum": [i.value for i in Intent]},
+                    "goes_first": {"enum": [me_name, other_name, None]},
+                    "text": {"type": "string", "description": "One or two short sentences, spoken to the other robot."},
+                },
+                "required": ["intent", "text"],
+            },
+        }
 
     def respond(self, me: Robot, other: Robot, history: list[Message]) -> Message:
         # Each robot sees the same history from its own point of view: its own
@@ -173,25 +187,21 @@ class LLMPolicy:
             max_tokens=300,
             system=SYSTEM.format(name=me.name, other=other.name, situation=me.situation),
             messages=messages,
+            tools=[self._tool(me.name, other.name)],
+            tool_choice={"type": "tool", "name": "respond"},
         )
-        return self._parse(reply.content[0].text, me, other)
+        print(f"[LLM raw] {me.name}: {reply.content}")  # debugging: the exact reply from the model
+        call = next(block for block in reply.content if block.type == "tool_use")
+        return self._to_message(me, other, call.input)
 
     @staticmethod
-    def _parse(raw: str, me: Robot, other: Robot) -> Message:
-        """Tolerant parse. A malformed reply becomes an INFORM rather than a crash."""
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not match:
-            return Message(me.name, Intent.INFORM, None, raw.strip()[:200])
-        try:
-            data = json.loads(match.group())
-            intent = Intent(data.get("intent", "inform"))
-        except (json.JSONDecodeError, ValueError):
-            return Message(me.name, Intent.INFORM, None, raw.strip()[:200])
-
-        goes_first = data.get("goes_first")
+    def _to_message(me: Robot, other: Robot, tool_input: dict) -> Message:
+        """The schema should already guarantee this shape - this is a cheap
+        second check, not a parser."""
+        goes_first = tool_input.get("goes_first")
         if goes_first not in (me.name, other.name, None):
-            goes_first = None  # hallucinated a name; drop it rather than trust it
-        return Message(me.name, intent, goes_first, str(data.get("text", ""))[:300])
+            goes_first = None  # belt and suspenders; the schema should prevent this
+        return Message(me.name, Intent(tool_input.get("intent", "inform")), goes_first, str(tool_input.get("text", ""))[:300])
 
 
 # ---------------------------------------------------------------------------
