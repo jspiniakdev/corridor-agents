@@ -204,6 +204,19 @@ class LLMPolicy:
         return Message(me.name, Intent(tool_input.get("intent", "inform")), goes_first, str(tool_input.get("text", ""))[:300])
 
 
+# --- the policy registry ----------------------------------------------------
+# Maps the name used on the command line (and in experiments/cases.csv) to
+# the class that implements it. Shared by run.py and eval.py so there is only
+# one place that knows about all four policies.
+
+POLICIES: dict[str, type] = {
+    "always_yield": AlwaysYield,
+    "never_yield": NeverYield,
+    "stubborn": Stubborn,
+    "llm": LLMPolicy,
+}
+
+
 # ---------------------------------------------------------------------------
 # The exchange
 # ---------------------------------------------------------------------------

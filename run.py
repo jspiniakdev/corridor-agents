@@ -16,15 +16,8 @@ import sys
 
 sys.path.insert(0, "src")
 
-from negotiation import AlwaysYield, LLMPolicy, NeverYield, Robot, Stubborn, negotiate  # noqa: E402
+from negotiation import POLICIES, Robot, negotiate  # noqa: E402
 from scenarios import BY_ID, SCENARIOS  # noqa: E402
-
-POLICIES = {
-    "always_yield": AlwaysYield,
-    "never_yield": NeverYield,
-    "stubborn": Stubborn,
-    "llm": LLMPolicy,
-}
 
 
 def main() -> int:

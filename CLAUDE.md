@@ -14,20 +14,23 @@ saying which decision it contradicts and why it should be revisited.
 
 ## Current state
 
-**Phase 1 complete.** Two robots negotiate over a corridor in one process. No
-world, no network, no cloud.
+**Phase 2 complete.** Two robots negotiate over a corridor in one process
+(`run.py`), and a batch harness (`eval.py`) runs every case in
+`experiments/cases.csv` and reports agreement rate, correctness, and messages
+used. No world, no network, no cloud.
 
-**Next: Phase 2 — make it measurable.** Run every scenario × policy pairing,
-repeated, and record agreement rate, correctness, and messages used. See
-`PLAN.md` §5.
+**Next: Phase 3 — add the world.** A grid, a corridor, robots that actually
+move. See `PLAN.md` §5.
 
 ## How to run things
 
 ```bash
 source .venv/bin/activate        # Python 3.13; required in each new shell
-python -m pytest tests/ -q       # 11 tests, no API calls, ~0.02s
+python -m pytest tests/ -q       # 17 tests, no API calls, ~0.02s
 python run.py                    # one negotiation, deterministic policies
 python run.py --a llm --b llm    # needs: cp .env.example .env && source .env
+python eval.py                   # measurement sweep, deterministic cases only
+python eval.py --full            # also runs the llm-involving cases
 ```
 
 ## The one design principle

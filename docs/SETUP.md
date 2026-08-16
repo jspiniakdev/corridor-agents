@@ -21,7 +21,7 @@ cd ~/Projects/corridor-agents
 python3.13 -m venv .venv
 source .venv/bin/activate          # re-run in every new shell; prompt shows (.venv)
 pip install -r requirements.txt
-python -m pytest tests/ -q         # expect: 11 passed
+python -m pytest tests/ -q         # expect: 17 passed
 python run.py                      # expect: agreed, Robot A goes first (correct)
 ```
 

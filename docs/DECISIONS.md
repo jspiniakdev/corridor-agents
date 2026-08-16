@@ -180,3 +180,54 @@ constraint is enforced API-side, and the check costs nothing.
 **Would change our mind:** if a future policy needs genuinely free-form
 output (not a structured decision plus a `text` field alongside it), forced
 tool-use would need to loosen or go away for that policy.
+
+---
+
+## D9 — What to measure is data (`cases.csv`), not code
+
+**Decided:** `experiments/cases.csv` lists every (scenario, policy_a, policy_b,
+repeats) combination `eval.py` should run. `eval.py` just reads the file,
+skips any row touching the `llm` policy unless `--full` was passed, and runs
+the rest. The file's initial ~80 rows were generated once by a throwaway
+script (every deterministic pairing × every scenario, plus every
+llm-touching pairing × every scenario × 3 repeats) and then committed as a
+plain static file — nothing in the codebase regenerates it automatically.
+
+**Rejected:** generating the combinations inside `eval.py` itself (e.g. an
+`itertools.product` over policies and scenarios at runtime).
+
+**Why:** what gets measured should be editable without touching code. Adding
+one weird pairing, dropping a scenario from the sweep, or bumping an LLM
+pairing's repeat count is a spreadsheet edit, not a Python change. It also
+means the file can be inspected on its own to see exactly what "the sweep"
+currently covers.
+
+**Would change our mind:** if the case list needed to be generated
+dynamically from something that changes often (e.g. scenarios themselves
+being generated per run rather than hand-authored), a static file would stop
+making sense.
+
+---
+
+## D10 — `correct` is `None`, not `False`, when no decision was reached
+
+**Decided:** in `eval.py`'s per-episode result row, `correct` is `None`
+whenever `should_go_first` is `None` (a genuine tie — no ground truth to be
+right or wrong about) **or** the robots never agreed at all (a deadlock).
+Only an actual `agreed_on` decision gets scored `True`/`False` against
+`should_go_first`.
+
+**Rejected:** scoring a deadlock as `correct=False` on the reasoning that
+"the truly urgent robot didn't get priority."
+
+**Why:** PLAN.md §9 tracks agreement rate and correctness as separate
+metrics on purpose. Folding deadlocks into `correct=False` would make the
+correctness rate move every time the agreement rate moves, for no new
+information — it's already captured by "did they agree" and shouldn't also
+silently degrade "was the decision right," which should only be about
+episodes where a decision actually happened.
+
+**Would change our mind:** if a future phase specifically wants a metric like
+"did the truly urgent robot end up going first, counting deadlock as a loss"
+— that would be a new, explicitly named metric, not a redefinition of
+`correct`.
