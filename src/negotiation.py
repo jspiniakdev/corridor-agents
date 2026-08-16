@@ -30,9 +30,8 @@ class Intent(str, Enum):
     """What a message is *doing*. FIPA-ACL called these performatives."""
 
     INFORM = "inform"    # here is something about my situation
-    PROPOSE = "propose"  # I suggest X goes first
+    PROPOSE = "propose"  # I suggest X goes first - including as a counter to a proposal I disagree with
     ACCEPT = "accept"    # I agree to the standing proposal
-    REJECT = "reject"    # I do not agree
 
 
 @dataclass(frozen=True)
@@ -65,7 +64,7 @@ class Robot:
 class Policy(Protocol):
     """How a robot decides what to say. Everything outside is agnostic to this."""
 
-    def respond(self, me: Robot, other: Robot, history: list[Message]) -> Message: ...
+    def respond(self, me: Robot, other: Robot, history: list[Message], max_turns: int) -> Message: ...
 
 
 def standing_proposal(history: list[Message]) -> Message | None:
@@ -84,7 +83,7 @@ def standing_proposal(history: list[Message]) -> Message | None:
 class AlwaysYield:
     """Defers to the other robot. Agrees to anything."""
 
-    def respond(self, me: Robot, other: Robot, history: list[Message]) -> Message:
+    def respond(self, me: Robot, other: Robot, history: list[Message], max_turns: int) -> Message:
         proposal = standing_proposal(history)
         if proposal and proposal.speaker != me.name:
             return Message(me.name, Intent.ACCEPT, proposal.goes_first, "Understood, proceeding as agreed.")
@@ -92,27 +91,27 @@ class AlwaysYield:
 
 
 class NeverYield:
-    """Insists on going first. Rejects everything else. A useful adversary."""
+    """Insists on going first. Never backs down. A useful adversary."""
 
-    def respond(self, me: Robot, other: Robot, history: list[Message]) -> Message:
+    def respond(self, me: Robot, other: Robot, history: list[Message], max_turns: int) -> Message:
         proposal = standing_proposal(history)
         if proposal and proposal.speaker != me.name:
             if proposal.goes_first == me.name:
                 return Message(me.name, Intent.ACCEPT, me.name, "Agreed, proceeding.")
-            return Message(me.name, Intent.REJECT, me.name, "Negative. I am going first.")
+            return Message(me.name, Intent.PROPOSE, me.name, "Negative. I am going first.")
         return Message(me.name, Intent.PROPOSE, me.name, "I am going first.")
 
 
 class Stubborn:
     """Proposes itself once, then accepts rather than deadlocking. A middle baseline."""
 
-    def respond(self, me: Robot, other: Robot, history: list[Message]) -> Message:
+    def respond(self, me: Robot, other: Robot, history: list[Message], max_turns: int) -> Message:
         mine = [m for m in history if m.speaker == me.name]
         proposal = standing_proposal(history)
         if proposal and proposal.speaker != me.name:
             if len(mine) >= 2 or proposal.goes_first == me.name:
                 return Message(me.name, Intent.ACCEPT, proposal.goes_first, "Fine. Agreed.")
-            return Message(me.name, Intent.REJECT, me.name, "I have priority here.")
+            return Message(me.name, Intent.PROPOSE, me.name, "I have priority here.")
         return Message(me.name, Intent.PROPOSE, me.name, "Requesting to go first.")
 
 
@@ -126,13 +125,23 @@ You and {other} are approaching a corridor from opposite ends. Only ONE robot
 fits at a time. If you both enter you deadlock and neither task completes.
 You are talking directly to {other} over a radio link.
 
+{other} might be reasonable, or might be extremely stubborn and unwilling to
+back down no matter what you say. Do not assume {other} will yield just
+because you hold firm.
+
+You and {other} have {turns_left} exchanges left, combined, before this
+negotiation times out with nothing decided - which is the worst outcome for
+both of you. Agree as soon as you reasonably can. Dragging this out helps no
+one.
+
 PRIVATE - {other} cannot see this unless you choose to say it:
 {situation}
 
 Call the respond tool for your next message. Use "propose" to suggest who
-goes first, "accept" to agree to their standing proposal (set goes_first to
-the same value they used), "reject" to refuse. Talk like a machine in a
-hurry, not a chatbot."""
+goes first - this is also how you disagree with {other}'s last proposal:
+just propose again with yourself as goes_first, instead of only refusing.
+Use "accept" to agree with {other}'s most recent proposal (set goes_first to
+the same value they used). Talk like a machine in a hurry, not a chatbot."""
 
 
 class LLMPolicy:
@@ -165,11 +174,11 @@ class LLMPolicy:
                     "goes_first": {"enum": [me_name, other_name, None]},
                     "text": {"type": "string", "description": "One or two short sentences, spoken to the other robot."},
                 },
-                "required": ["intent", "text"],
+                "required": ["intent", "goes_first", "text"],
             },
         }
 
-    def respond(self, me: Robot, other: Robot, history: list[Message]) -> Message:
+    def respond(self, me: Robot, other: Robot, history: list[Message], max_turns: int) -> Message:
         # Each robot sees the same history from its own point of view: its own
         # lines are "assistant", the other's are "user".
         messages = [
@@ -182,10 +191,13 @@ class LLMPolicy:
         if not messages or messages[0]["role"] != "user":
             messages.insert(0, {"role": "user", "content": "[radio link established]"})
 
+        turns_left = max_turns - len(history)
+        system_prompt = SYSTEM.format(name=me.name, other=other.name, situation=me.situation, turns_left=turns_left)
+
         reply = self.client.messages.create(
             model=self.model,
             max_tokens=300,
-            system=SYSTEM.format(name=me.name, other=other.name, situation=me.situation),
+            system=system_prompt,
             messages=messages,
             tools=[self._tool(me.name, other.name)],
             tool_choice={"type": "tool", "name": "respond"},
@@ -254,7 +266,7 @@ def negotiate(a: Robot, b: Robot, max_turns: int = 6) -> Outcome:
     history: list[Message] = []
     for turn in range(max_turns):
         speaker, other = (a, b) if turn % 2 == 0 else (b, a)
-        history.append(speaker.policy.respond(speaker, other, history))
+        history.append(speaker.policy.respond(speaker, other, history, max_turns))
         agreed = _check_agreement(history)
         if agreed:
             return Outcome(history, agreed)

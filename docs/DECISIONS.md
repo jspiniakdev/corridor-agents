@@ -231,3 +231,41 @@ episodes where a decision actually happened.
 "did the truly urgent robot end up going first, counting deadlock as a loss"
 — that would be a new, explicitly named metric, not a redefinition of
 `correct`.
+
+---
+
+## D11 — Drop `REJECT`; disagreeing is just proposing again
+
+**Decided:** `Intent` has three values now, not four - `inform`, `propose`,
+`accept`. There is no `reject`. A robot that disagrees with the standing
+proposal simply sends a new `propose` naming itself (or whoever it thinks
+should go first) instead. `goes_first` is also now a *required* field in
+`LLMPolicy`'s tool schema, not just `intent` and `text`.
+
+**Rejected:** the original four-intent design, where disagreeing meant
+sending `reject` (with `goes_first` as unstructured flavor, not a real
+standing position).
+
+**Why:** `standing_proposal()` only ever tracked `PROPOSE` messages. Under
+the old design, a robot that "insisted on itself" via `REJECT`
+(`NeverYield`, `Stubborn`, and - naturally, since the prompt offered it as
+an option - `LLMPolicy` too) never actually put a new position on the
+table. A later `ACCEPT` of that position had nothing valid to match against,
+so it silently failed to register as agreement and the negotiation burned
+through the remaining turns instead. This was caught directly: `Stubborn`
+vs `Stubborn` "agreed" after 6 messages, but on inspection that agreement
+was Robot A matching its own six-message-stale first proposal, not
+Robot B's actual (rejected-and-reasserted) position - a bug wearing the
+costume of a resolved negotiation. The fix removes the second, untracked
+way of expressing a position, so there's only one - `PROPOSE` - and
+`_check_agreement` (unchanged) always has something real to match against.
+
+**Consequence:** deterministic baselines changed behavior. `Stubborn` vs
+`Stubborn` now resolves in 5 messages (was 6) and agrees on Robot B (was
+Robot A, incorrectly). The Phase 2 default sweep's numbers moved too:
+agreement rate 78% → 89%, since several pairings that used to falsely
+deadlock now resolve correctly.
+
+**Would change our mind:** nothing foreseen - `REJECT` added no real
+information `PROPOSE` couldn't already carry, since `goes_first` was always
+the field that mattered.

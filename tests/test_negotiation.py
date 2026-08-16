@@ -58,6 +58,17 @@ def test_never_yield_beats_always_yield():
     assert out.agreed_on == "Robot A"
 
 
+def test_stubborn_vs_stubborn_agrees_on_whoever_gives_in():
+    """Regression test: a robot re-asserting itself must count as a real
+    standing proposal, so the other robot's later ACCEPT actually matches
+    it - not the very first proposal from many turns ago."""
+    a, b = make(Stubborn, Stubborn)
+    out = negotiate(a, b)
+    assert out.agreed
+    assert out.agreed_on == "Robot B"
+    assert out.messages_used == 5
+
+
 def test_agreement_stops_the_exchange_early():
     a, b = make(AlwaysYield, AlwaysYield)
     out = negotiate(a, b, max_turns=6)
@@ -79,7 +90,7 @@ def test_ground_truth_is_never_shown_to_a_policy():
     """urgency is for scoring only. It must not leak into any prompt."""
     from negotiation import SYSTEM
 
-    prompt = SYSTEM.format(name="Robot A", other="Robot B", situation=S.a_situation)
+    prompt = SYSTEM.format(name="Robot A", other="Robot B", situation=S.a_situation, turns_left=6)
     assert "urgency" not in prompt.lower()
     assert str(S.a_urgency) not in prompt
 

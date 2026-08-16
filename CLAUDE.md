@@ -26,7 +26,7 @@ move. See `PLAN.md` §5.
 
 ```bash
 source .venv/bin/activate        # Python 3.13; required in each new shell
-python -m pytest tests/ -q       # 17 tests, no API calls, ~0.02s
+python -m pytest tests/ -q       # 18 tests, no API calls, ~0.02s
 python run.py                    # one negotiation, deterministic policies
 python run.py --a llm --b llm    # needs: cp .env.example .env && source .env
 python eval.py                   # measurement sweep, deterministic cases only
