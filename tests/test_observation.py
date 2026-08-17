@@ -1,0 +1,98 @@
+"""Tests for the Phase 3 observation composition (PLAN.md §4.1's "Job 4").
+Zero API calls - observation.py has no dependency on the network, the world
+loop, or anything beyond plain values.
+"""
+
+import sys
+
+sys.path.insert(0, "src")
+
+from negotiation import Robot  # noqa: E402
+from observation import compose_observation, distance_to_entrance  # noqa: E402
+from scenarios import SCENARIOS  # noqa: E402
+from world import (  # noqa: E402
+    A_BOUNDARY,
+    A_DIRECTION,
+    B_BOUNDARY,
+    B_DIRECTION,
+    CORRIDOR_ZONE,
+    RobotState,
+    SENSOR_RANGE,
+    WorldState,
+    executive_decide,
+)
+
+S = SCENARIOS[0]
+
+
+def test_distance_to_entrance_for_robot_a():
+    assert distance_to_entrance(position=1, direction=1, corridor_zone=CORRIDOR_ZONE) == 2
+    assert distance_to_entrance(position=2, direction=1, corridor_zone=CORRIDOR_ZONE) == 1
+
+
+def test_distance_to_entrance_for_robot_b():
+    assert distance_to_entrance(position=8, direction=-1, corridor_zone=CORRIDOR_ZONE) == 3
+    assert distance_to_entrance(position=6, direction=-1, corridor_zone=CORRIDOR_ZONE) == 1
+
+
+def test_sensor_fact_present_within_range():
+    text = compose_observation(2, 1, 2 + SENSOR_RANGE, CORRIDOR_ZONE, SENSOR_RANGE, "private")
+    assert "Another robot" in text
+
+
+def test_sensor_fact_absent_just_outside_range():
+    text = compose_observation(2, 1, 2 + SENSOR_RANGE + 1, CORRIDOR_ZONE, SENSOR_RANGE, "private")
+    assert "Another robot" not in text
+
+
+def test_private_text_appears_verbatim():
+    text = compose_observation(2, 1, 6, CORRIDOR_ZONE, SENSOR_RANGE, "the exact private sentence")
+    assert "the exact private sentence" in text
+
+
+def test_urgency_never_appears_in_a_composed_observation():
+    """Same invariant test_negotiation.py already enforces for the static
+    scenario text, extended to the new computed observation. Checking for
+    the word "urgency" only, not the numeric value - a small integer like
+    "1" would coincidentally match unrelated digits elsewhere in the text
+    (e.g. "1 cell(s) from the entrance"), which isn't a real leak."""
+    for scenario in SCENARIOS:
+        for position in range(1, 9):
+            text = compose_observation(position, 1, 5, CORRIDOR_ZONE, SENSOR_RANGE, scenario.a_situation)
+            assert "urgency" not in text.lower()
+
+    # compose_observation has no way to leak urgency even in principle: its
+    # signature doesn't accept it as an input at all.
+    import inspect
+
+    assert "urgency" not in inspect.signature(compose_observation).parameters
+
+
+class RecordingPolicy:
+    """Records the exact situation string it was handed, so a test can
+    confirm negotiation actually receives the fresh computed observation -
+    not the original static scenario text."""
+
+    def __init__(self):
+        self.seen_situation = None
+
+    def respond(self, me, other, history, max_turns):
+        self.seen_situation = me.situation
+        from negotiation import Intent, Message
+
+        return Message(me.name, Intent.ACCEPT, other.name)
+
+
+def test_negotiation_actually_receives_the_computed_observation_not_raw_scenario_text():
+    a_policy = RecordingPolicy()
+    b_policy = RecordingPolicy()
+    robot_a = Robot("Robot A", S.a_situation, S.a_urgency, a_policy)
+    robot_b = Robot("Robot B", S.b_situation, S.b_urgency, b_policy)
+    a = RobotState(robot_a, A_BOUNDARY, A_DIRECTION, A_BOUNDARY, 8)
+    b = RobotState(robot_b, B_BOUNDARY, B_DIRECTION, B_BOUNDARY, 1)
+    state = WorldState(a, b, S)
+
+    executive_decide(state, deliberate=True, max_negotiation_turns=6)
+
+    assert "cell(s) from the corridor entrance" in a_policy.seen_situation
+    assert a_policy.seen_situation != S.a_situation

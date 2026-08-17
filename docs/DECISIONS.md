@@ -234,6 +234,51 @@ episodes where a decision actually happened.
 
 ---
 
+## D12 — Phase 3: collision prevented structurally, negotiation only on genuine standoff
+
+**Decided:** `src/world.py`'s reactive layer (`reactive_filter`) independently
+re-derives whether two proposed moves would put both robots in the corridor
+zone at once, regardless of what decided those moves — so collision is
+structurally impossible, not merely avoided by trusting the layer above it.
+Separately, the deliberative layer (real negotiation) only fires when a robot
+at its boundary can currently *sense* the other robot (within
+`SENSOR_RANGE`), not only on an exact simultaneous double-arrival. Once
+either robot reaches its boundary alone with nothing else nearby, it simply
+claims priority and proceeds — zero LLM calls, matching `PLAN.md` §4.3.
+
+**Rejected:** two things.
+1. Trusting the executive layer's move/wait decision without independent
+   verification — a bug there could otherwise cause a real collision, not
+   just a wrong-but-safe outcome.
+2. Requiring an exact simultaneous double-arrival to trigger negotiation.
+   With the real start positions (A=1, B=8) and `CORRIDOR_ZONE={3,4,5}`, A
+   structurally reaches its boundary one tick before B always does — under
+   the exact-arrival rule, negotiation *never* fired in a real episode, only
+   when both robots were manually placed at their boundaries for a test.
+
+**Why:** the reactive layer's guarantee needs to hold even if the executive
+layer is wrong, later, for reasons nobody anticipated - re-deriving
+independently from actual positions is what makes it structural rather than
+trusted. The sensor-range trigger fixes a real, confirmed bug (via a live
+`simulate.py` run) without needing to hand-tune start positions for
+artificial symmetry - it generalizes to any starting configuration where the
+robots come within sensing range of each other, not just a perfectly
+synchronized one.
+
+**Consequence:** `deliberate=False` (FCFS) explicitly does NOT get the
+sensor-based broadening - it keeps the old strict rule (only an exact
+double-arrival is a real tie). Applying the same broadening there would
+corrupt what FCFS means: "no communication, strict arrival order." A robot
+that genuinely arrived first should stay the winner under FCFS, not get
+overridden by a tie-break rule it didn't actually tie for.
+
+**Would change our mind:** if a future scenario needs robots to reason about
+conflicts from much further away than one sensor-range's worth of lead time
+— that would need a genuinely different mechanism (e.g. broadcasting intent),
+not just a larger constant.
+
+---
+
 ## D11 — Drop `REJECT`; disagreeing is just proposing again
 
 **Decided:** `Intent` has three values now, not four - `inform`, `propose`,

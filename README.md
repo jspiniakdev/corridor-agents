@@ -7,9 +7,10 @@ separate networked service.
 A learning project: agent-to-agent protocols, agent design, and cloud infra —
 introduced one layer at a time.
 
-**Status: Phase 2 complete.** Two robots negotiate in one process, and a batch
-harness runs many negotiations and measures how well they went. No world, no
-network, no cloud.
+**Status: Phase 3 in progress.** Two robots negotiate over a real 1D grid and
+their decision causes actual movement, with a structural guarantee they can
+never collide. A batch harness measures plain negotiations (Phase 2); a batch
+harness for grid episodes is next. No network, no cloud.
 
 ## Run it
 
@@ -35,6 +36,14 @@ python eval.py          # every deterministic scenario x policy pairing, free, i
 python eval.py --full   # also the llm-involving cases - costs money, takes minutes
 ```
 
+To run one grid episode (Phase 3):
+
+```bash
+python simulate.py                              # deliberate, deterministic policies
+python simulate.py --no-deliberate               # FCFS baseline - no negotiation at all
+python simulate.py --scenario routine_vs_medical --a llm --b llm
+```
+
 Tests need no API key and run in milliseconds:
 
 ```bash
@@ -48,8 +57,11 @@ docs/PLAN.md              the project, the phases, the infra reasoning
 docs/DECISIONS.md         why things were chosen
 src/negotiation.py        messages, policies, the exchange loop
 src/scenarios.py          corridor scenarios with hidden ground-truth urgency
+src/world.py              the grid, the reactive/executive layers, the tick loop
+src/observation.py        computes what a robot can see from position + sensors
 run.py                    CLI for one negotiation
 eval.py                   CLI for the measurement sweep (Phase 2)
+simulate.py               CLI for one grid episode (Phase 3)
 experiments/cases.csv     which scenario x policy pairings to run, and how many times
 experiments/results/      eval.py's output, regenerable, gitignored
 tests/                    deterministic tests, zero API calls
@@ -81,6 +93,29 @@ tests/                    deterministic tests, zero API calls
   correctness rate (over decided episodes only), and average messages used
   across 45 deterministic episodes.
 
-## Next: Phase 3 — add the world
+## What Phase 3 established (so far)
 
-A grid, a corridor, robots that actually move. See `docs/PLAN.md` §5.
+- **Collision is structurally impossible, not just avoided.** `reactive_filter`
+  in `src/world.py` independently re-derives whether two proposed moves would
+  put both robots in the corridor zone at once, regardless of what decided
+  those moves — a bug upstream can cause starvation, never a collision.
+- **Negotiation is the exception, not the rule.** Most of the time, whichever
+  robot reaches its boundary first just claims priority and proceeds — zero
+  LLM calls. The deliberative layer only fires on a genuine standoff: a robot
+  at its boundary that can currently *sense* the other robot (within
+  `SENSOR_RANGE`), even if the other hasn't arrived yet.
+- **FCFS stays FCFS.** The sensor-based early trigger only applies when
+  `deliberate=True`. `--no-deliberate` keeps the strict old rule — only an
+  exact double-arrival is a real tie — since broadening it would corrupt what
+  "no communication, strict arrival order" actually means.
+- **The observation is computed, not fixed.** `src/observation.py` builds a
+  robot's situation fresh at the moment of a standoff, from real position and
+  sensor facts plus the same hand-authored private text scenarios.py always
+  provided. Confirmed live: an LLM's own reasoning has directly echoed the
+  computed "N cells from the corridor entrance" fact back in its argument.
+
+## Next: batch evaluation for grid episodes
+
+`eval.py` only measures plain negotiations (Phase 2) — it knows nothing about
+`src/world.py`. A `simulate.py`-based batch sweep, producing the same kind of
+agreement-rate/correctness/ticks-used numbers for grid episodes, is next.
