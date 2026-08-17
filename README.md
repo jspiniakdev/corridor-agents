@@ -7,10 +7,10 @@ separate networked service.
 A learning project: agent-to-agent protocols, agent design, and cloud infra —
 introduced one layer at a time.
 
-**Status: Phase 3 in progress.** Two robots negotiate over a real 1D grid and
+**Status: Phase 3 complete.** Two robots negotiate over a real 1D grid and
 their decision causes actual movement, with a structural guarantee they can
-never collide. A batch harness measures plain negotiations (Phase 2); a batch
-harness for grid episodes is next. No network, no cloud.
+never collide. Two batch harnesses: one measures plain negotiations (Phase 2),
+one measures grid episodes (Phase 3). No network, no cloud.
 
 ## Run it
 
@@ -44,6 +44,13 @@ python simulate.py --no-deliberate               # FCFS baseline - no negotiatio
 python simulate.py --scenario routine_vs_medical --a llm --b llm
 ```
 
+To run the measurement sweep for grid episodes (Phase 3):
+
+```bash
+python world_eval.py          # deterministic + FCFS cases, free, instant
+python world_eval.py --full   # also the deliberate llm-involving cases - costs money
+```
+
 Tests need no API key and run in milliseconds:
 
 ```bash
@@ -53,18 +60,20 @@ pip install pytest && python -m pytest tests/ -q
 ## Layout
 
 ```
-docs/PLAN.md              the project, the phases, the infra reasoning
-docs/DECISIONS.md         why things were chosen
-src/negotiation.py        messages, policies, the exchange loop
-src/scenarios.py          corridor scenarios with hidden ground-truth urgency
-src/world.py              the grid, the reactive/executive layers, the tick loop
-src/observation.py        computes what a robot can see from position + sensors
-run.py                    CLI for one negotiation
-eval.py                   CLI for the measurement sweep (Phase 2)
-simulate.py               CLI for one grid episode (Phase 3)
-experiments/cases.csv     which scenario x policy pairings to run, and how many times
-experiments/results/      eval.py's output, regenerable, gitignored
-tests/                    deterministic tests, zero API calls
+docs/PLAN.md                 the project, the phases, the infra reasoning
+docs/DECISIONS.md            why things were chosen
+src/negotiation.py           messages, policies, the exchange loop
+src/scenarios.py             corridor scenarios with hidden ground-truth urgency
+src/world.py                 the grid, the reactive/executive layers, the tick loop
+src/observation.py           computes what a robot can see from position + sensors
+run.py                       CLI for one negotiation
+eval.py                      CLI for the measurement sweep (Phase 2)
+simulate.py                  CLI for one grid episode (Phase 3)
+world_eval.py                CLI for the grid-episode measurement sweep (Phase 3)
+experiments/cases.csv        which scenario x policy pairings to run (Phase 2)
+experiments/world_cases.csv  which scenario/policy/deliberate-mode combos to run (Phase 3)
+experiments/results/         eval.py's and world_eval.py's output, regenerable, gitignored
+tests/                       deterministic tests, zero API calls
 ```
 
 ## What Phase 1 established
@@ -93,7 +102,7 @@ tests/                    deterministic tests, zero API calls
   correctness rate (over decided episodes only), and average messages used
   across 45 deterministic episodes.
 
-## What Phase 3 established (so far)
+## What Phase 3 established
 
 - **Collision is structurally impossible, not just avoided.** `reactive_filter`
   in `src/world.py` independently re-derives whether two proposed moves would
@@ -113,9 +122,16 @@ tests/                    deterministic tests, zero API calls
   sensor facts plus the same hand-authored private text scenarios.py always
   provided. Confirmed live: an LLM's own reasoning has directly echoed the
   computed "N cells from the corridor entrance" fact back in its argument.
+- **FCFS is provably policy-blind.** Under `deliberate=False`, no policy's
+  `.respond()` is ever called — a test enforces this. That means a case
+  naming the `llm` policy under FCFS costs nothing and always runs, even
+  without `--full`, unlike its deliberate counterpart.
+- **The first grid number:** `python world_eval.py` currently reports
+  completion rate, how often a genuine negotiation happened (vs. priority
+  being claimed solo), correctness rate, and average ticks used, across 50
+  free episodes (45 deliberate deterministic pairings + 5 FCFS baselines).
 
-## Next: batch evaluation for grid episodes
+## Next: Phase 4 — split into separate processes
 
-`eval.py` only measures plain negotiations (Phase 2) — it knows nothing about
-`src/world.py`. A `simulate.py`-based batch sweep, producing the same kind of
-agreement-rate/correctness/ticks-used numbers for grid episodes, is next.
+Each agent becomes its own HTTP service, with homemade messaging. See
+`docs/PLAN.md` §5.

@@ -237,6 +237,7 @@ class EpisodeResult:
     log: list
     ticks_used: int
     completed: bool
+    priority: str | None = None  # who was given priority, however it was decided
     negotiation: object = None  # the negotiation.Outcome, if a standoff happened
 
 
@@ -254,11 +255,11 @@ def run_episode(
 
     while state.tick < max_ticks:
         if state.a.reached_target and state.b.reached_target:
-            return EpisodeResult(state.log, state.tick, True, state.negotiation_outcome)
+            return EpisodeResult(state.log, state.tick, True, state.priority, state.negotiation_outcome)
 
         if state.negotiation_outcome is not None and not state.negotiation_outcome.agreed:
             break  # terminal deadlock - no point burning the remaining ticks
 
         step(state, deliberate, max_negotiation_turns)
 
-    return EpisodeResult(state.log, state.tick, False, state.negotiation_outcome)
+    return EpisodeResult(state.log, state.tick, False, state.priority, state.negotiation_outcome)

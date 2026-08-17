@@ -14,26 +14,31 @@ saying which decision it contradicts and why it should be revisited.
 
 ## Current state
 
-**Phase 3 in progress.** Two robots negotiate over a real 1D grid
+**Phase 3 complete.** Two robots negotiate over a real 1D grid
 (`src/world.py`, run via `simulate.py`) and their decision causes actual
 movement, with collision structurally impossible (the reactive layer
 re-derives it independently every tick). Negotiation only fires on a genuine
 standoff - a robot at its boundary that can sense the other, even before the
 other arrives - everything else resolves for free with zero LLM calls.
-`eval.py`/`experiments/cases.csv` (Phase 2) still only measure plain
-negotiations; a batch sweep for grid episodes is next.
+`world_eval.py`/`experiments/world_cases.csv` batch-measure grid episodes,
+alongside `eval.py`/`experiments/cases.csv` (Phase 2) for plain negotiations.
+
+**Next: Phase 4 — split into separate processes.** Each agent becomes its own
+HTTP service, with homemade messaging. See `PLAN.md` §5.
 
 ## How to run things
 
 ```bash
 source .venv/bin/activate        # Python 3.13; required in each new shell
-python -m pytest tests/ -q       # 38 tests, no API calls, ~0.03s
+python -m pytest tests/ -q       # 43 tests, no API calls, ~0.04s
 python run.py                    # one negotiation, deterministic policies
 python run.py --a llm --b llm    # needs: cp .env.example .env && source .env
 python eval.py                   # measurement sweep, deterministic cases only
 python eval.py --full            # also runs the llm-involving cases
 python simulate.py               # one grid episode, deliberate, deterministic
 python simulate.py --no-deliberate --a llm --b llm  # FCFS baseline vs. negotiation
+python world_eval.py             # grid-episode measurement sweep, free cases only
+python world_eval.py --full      # also runs the deliberate llm-involving cases
 ```
 
 ## The one design principle
