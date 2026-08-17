@@ -56,17 +56,34 @@
     margin-bottom: 1.5rem;
   }
 
-  #tick-label {
+  #status-line {
+    display: flex;
+    justify-content: space-between;
     font-weight: bold;
     margin-bottom: 0.75rem;
   }
 
+  #current-priority {
+    color: #6b7280;
+    font-weight: normal;
+  }
+
   #track {
     position: relative;
-    height: 90px;
+    height: 130px;
     margin: 0 1rem;
     background: #e5e7eb;
     border-radius: 6px;
+  }
+
+  /* Outside the corridor zone, A and B are on separate lanes (top/bottom) -
+     they only ever share a lane inside the zone, which is the whole point
+     of the zone being exclusive. Lane guides make that visible: two lines
+     that run at different heights and only meet inside the tinted zone. */
+  .lane-guide {
+    position: absolute;
+    height: 0;
+    border-top: 2px dashed #d1d5db;
   }
 
   #corridor-zone {
@@ -86,7 +103,6 @@
 
   .robot-marker {
     position: absolute;
-    top: 50%;
     width: 34px;
     height: 34px;
     line-height: 34px;
@@ -95,7 +111,7 @@
     color: white;
     font-weight: bold;
     transform: translate(-50%, -50%);
-    transition: left 0.9s linear;
+    transition: left 0.9s linear, top 0.9s linear;
   }
 
   #marker-a { background: #2563eb; }
@@ -142,7 +158,13 @@
   .correct { color: #16a34a; font-weight: bold; }
   .wrong { color: #dc2626; font-weight: bold; }
 
-  #replay-button {
+  #controls {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 2rem;
+  }
+
+  #controls button {
     padding: 0.5rem 1rem;
     border-radius: 6px;
     border: none;
@@ -150,6 +172,15 @@
     color: white;
     font-size: 0.9rem;
     cursor: pointer;
+  }
+
+  #controls button:disabled {
+    background: #9ca3af;
+    cursor: default;
+  }
+
+  #restart-button {
+    background: #4b5563 !important;
   }
 </style>
 </head>
@@ -176,9 +207,16 @@
 </section>
 
 <section id="track-wrapper">
-  <div id="tick-label">tick -</div>
+  <div id="status-line">
+    <span id="tick-label">tick -</span>
+    <span id="current-priority">priority: undecided</span>
+  </div>
   <div id="track">
     <div id="corridor-zone"></div>
+    <div class="lane-guide" id="lane-guide-a-left"></div>
+    <div class="lane-guide" id="lane-guide-a-right"></div>
+    <div class="lane-guide" id="lane-guide-b-left"></div>
+    <div class="lane-guide" id="lane-guide-b-right"></div>
     <div class="boundary" id="a-boundary-marker"></div>
     <div class="boundary" id="b-boundary-marker"></div>
     <div class="robot-marker" id="marker-a">A</div>
@@ -198,126 +236,205 @@
   <div id="verdict-text"></div>
 </section>
 
-<button id="replay-button" hidden>Replay</button>
+<div id="controls">
+  <button id="back-button">Back</button>
+  <button id="play-pause-button">Pause</button>
+  <button id="next-button">Next</button>
+  <button id="restart-button">Restart</button>
+</div>
 
 <script>
 const EPISODE_DATA = /*__EPISODE_DATA__*/;
 
 const TICK_DELAY_MS = 1000;
 const MESSAGE_DELAY_MS = 900;
-const PRIORITY_PAUSE_MS = 1500;
+const DECISION_DELAY_MS = 1500;
 
-let tickPointer = 0;
-let messagePointer = 0;
-let pendingTimer = null;
+// The whole episode is precomputed into a flat list of "frames" - one
+// complete snapshot of everything the page should show at that moment.
+// Navigation (play/pause/back/next) is then just moving an index into this
+// list and re-rendering, which makes "go back" trivial: there's no
+// incremental state to undo, every frame already knows how to draw itself
+// fully on its own.
+let frames = [];
+let frameIndex = 0;
+let isPlaying = false;
+let playTimer = null;
+
+const LANE_A_PERCENT = 25;   // A's own lane, outside the corridor zone
+const LANE_B_PERCENT = 75;   // B's own lane, outside the corridor zone
+const LANE_SHARED_PERCENT = 50;   // the one-lane bridge, inside the corridor zone
 
 function positionToPercent(position) {
   const grid = EPISODE_DATA.grid;
   return ((position - grid.min_position) / (grid.max_position - grid.min_position)) * 100;
 }
 
-function init() {
-  document.getElementById("scenario-title").textContent = EPISODE_DATA.scenario_id;
-  document.getElementById("mode-line").textContent =
-    "Robot A: " + EPISODE_DATA.robots.a.policy + "  |  Robot B: " + EPISODE_DATA.robots.b.policy;
-
-  fillRobotCard("a", EPISODE_DATA.robots.a);
-  fillRobotCard("b", EPISODE_DATA.robots.b);
-
-  const grid = EPISODE_DATA.grid;
-  const zoneStart = Math.min(...grid.corridor_zone);
-  const zoneEnd = Math.max(...grid.corridor_zone);
-  const zoneEl = document.getElementById("corridor-zone");
-  zoneEl.style.left = positionToPercent(zoneStart) + "%";
-  zoneEl.style.width = (positionToPercent(zoneEnd) - positionToPercent(zoneStart)) + "%";
-
-  document.getElementById("a-boundary-marker").style.left = positionToPercent(grid.a_boundary) + "%";
-  document.getElementById("b-boundary-marker").style.left = positionToPercent(grid.b_boundary) + "%";
-
-  placeMarker("marker-a", EPISODE_DATA.robots.a.start_position);
-  placeMarker("marker-b", EPISODE_DATA.robots.b.start_position);
-
-  document.getElementById("tick-label").textContent = "tick -";
-  document.getElementById("action-log").textContent = "";
-  document.getElementById("dialogue-panel").hidden = true;
-  document.getElementById("chat-log").innerHTML = "";
-  document.getElementById("priority-banner").textContent = "";
-  document.getElementById("verdict-panel").hidden = true;
-  document.getElementById("replay-button").hidden = true;
-
-  tickPointer = 0;
-  messagePointer = 0;
-
-  scheduleNext(advance, TICK_DELAY_MS);
+function isInZone(position) {
+  return EPISODE_DATA.grid.corridor_zone.includes(position);
 }
 
-function fillRobotCard(letter, robot) {
-  const card = document.getElementById("robot-" + letter + "-card");
-  card.querySelector(".policy").textContent = "policy: " + robot.policy;
-  card.querySelector(".situation").textContent = robot.situation;
-  card.querySelector(".urgency").textContent = "ground-truth urgency: " + robot.urgency + " (never shown to the policy)";
+function buildFrames() {
+  const built = [];
+  let aPosition = EPISODE_DATA.robots.a.start_position;
+  let bPosition = EPISODE_DATA.robots.b.start_position;
+  let currentPriority = null;   // undecided until a log entry resolves it
+
+  built.push({
+    tickLabel: "tick -",
+    aPosition: aPosition,
+    bPosition: bPosition,
+    aAction: "",
+    bAction: "",
+    dialogueVisible: false,
+    chatMessages: [],
+    priorityText: null,
+    currentPriority: currentPriority,
+    verdictVisible: false,
+    delayMs: TICK_DELAY_MS,
+  });
+
+  EPISODE_DATA.log.forEach(function (entry) {
+    const isNegotiationTick =
+      EPISODE_DATA.negotiation !== null && EPISODE_DATA.negotiation.tick === entry.tick;
+
+    if (isNegotiationTick) {
+      const messages = EPISODE_DATA.negotiation.messages;
+
+      // one frame per message revealed so far - positions don't change,
+      // and priority is still undecided, while the robots are still talking
+      for (let shown = 1; shown <= messages.length; shown++) {
+        built.push({
+          tickLabel: "tick " + entry.tick + " - negotiating",
+          aPosition: aPosition,
+          bPosition: bPosition,
+          aAction: "",
+          bAction: "",
+          dialogueVisible: true,
+          chatMessages: messages.slice(0, shown),
+          priorityText: null,
+          currentPriority: currentPriority,
+          verdictVisible: false,
+          delayMs: MESSAGE_DELAY_MS,
+        });
+      }
+
+      // one frame showing the decided priority, before anyone moves
+      const negotiation = EPISODE_DATA.negotiation;
+      const decisionText = negotiation.agreed
+        ? "Priority: " + negotiation.agreed_on
+        : "DEADLOCK - no agreement";
+      currentPriority = entry.priority;
+      built.push({
+        tickLabel: "tick " + entry.tick + " - negotiating",
+        aPosition: aPosition,
+        bPosition: bPosition,
+        aAction: "",
+        bAction: "",
+        dialogueVisible: true,
+        chatMessages: messages,
+        priorityText: decisionText,
+        currentPriority: currentPriority,
+        verdictVisible: false,
+        delayMs: DECISION_DELAY_MS,
+      });
+    }
+
+    aPosition = entry.a_position;
+    bPosition = entry.b_position;
+    currentPriority = entry.priority;
+
+    built.push({
+      tickLabel: "tick " + entry.tick,
+      aPosition: aPosition,
+      bPosition: bPosition,
+      aAction: entry.a_action,
+      bAction: entry.b_action,
+      dialogueVisible: false,
+      chatMessages: [],
+      priorityText: null,
+      currentPriority: currentPriority,
+      verdictVisible: false,
+      delayMs: TICK_DELAY_MS,
+    });
+  });
+
+  built.push(buildVerdictFrame(aPosition, bPosition, currentPriority));
+
+  return built;
 }
 
-function placeMarker(elementId, position) {
-  document.getElementById(elementId).style.left = positionToPercent(position) + "%";
-}
+function buildVerdictFrame(aPosition, bPosition, currentPriority) {
+  const lines = [];
+  lines.push(EPISODE_DATA.completed ? "episode completed" : "did not complete");
+  lines.push("priority: " + (EPISODE_DATA.priority || "none decided"));
+  lines.push("should go first: " + (EPISODE_DATA.should_go_first || "tie, no ground truth"));
 
-function scheduleNext(fn, delayMs) {
-  pendingTimer = setTimeout(fn, delayMs);
-}
-
-function advance() {
-  if (tickPointer >= EPISODE_DATA.log.length) {
-    showVerdict();
-    return;
+  let verdictLine = "(no verdict possible)";
+  let verdictClass = null;
+  if (EPISODE_DATA.correct === true) {
+    verdictLine = "(correct)";
+    verdictClass = "correct";
+  } else if (EPISODE_DATA.correct === false) {
+    verdictLine = "(WRONG robot)";
+    verdictClass = "wrong";
   }
 
-  const entry = EPISODE_DATA.log[tickPointer];
-
-  if (EPISODE_DATA.negotiation !== null && EPISODE_DATA.negotiation.tick === entry.tick) {
-    beginNegotiation(entry);
-    return;
-  }
-
-  applyTick(entry);
-  tickPointer += 1;
-  scheduleNext(advance, TICK_DELAY_MS);
+  return {
+    tickLabel: "done",
+    aPosition: aPosition,
+    bPosition: bPosition,
+    aAction: "",
+    bAction: "",
+    dialogueVisible: false,
+    chatMessages: [],
+    priorityText: null,
+    currentPriority: currentPriority,
+    verdictVisible: true,
+    verdictLines: lines,
+    verdictLine: verdictLine,
+    verdictClass: verdictClass,
+    delayMs: null,
+  };
 }
 
-function applyTick(entry) {
-  placeMarker("marker-a", entry.a_position);
-  placeMarker("marker-b", entry.b_position);
-  document.getElementById("tick-label").textContent = "tick " + entry.tick;
+function render(frame) {
+  placeMarker("marker-a", frame.aPosition, LANE_A_PERCENT);
+  placeMarker("marker-b", frame.bPosition, LANE_B_PERCENT);
+  document.getElementById("tick-label").textContent = frame.tickLabel;
+  document.getElementById("current-priority").textContent = "priority: " + (frame.currentPriority || "undecided");
   document.getElementById("action-log").textContent =
-    "A: " + entry.a_action + "   B: " + entry.b_action;
-}
+    (frame.aAction || frame.bAction) ? "A: " + frame.aAction + "   B: " + frame.bAction : "";
 
-function beginNegotiation(entry) {
-  document.getElementById("dialogue-panel").hidden = false;
-  document.getElementById("chat-log").innerHTML = "";
-  document.getElementById("priority-banner").textContent = "";
-  messagePointer = 0;
-  revealNextMessage(entry);
-}
+  document.getElementById("dialogue-panel").hidden = !frame.dialogueVisible;
+  const chatLog = document.getElementById("chat-log");
+  chatLog.innerHTML = "";
+  frame.chatMessages.forEach(appendChatBubble);
+  document.getElementById("priority-banner").textContent = frame.priorityText || "";
 
-function revealNextMessage(entry) {
-  const messages = EPISODE_DATA.negotiation.messages;
-
-  if (messagePointer >= messages.length) {
-    showPriorityDecision();
-    scheduleNext(function () {
-      document.getElementById("dialogue-panel").hidden = true;
-      applyTick(entry);
-      tickPointer += 1;
-      scheduleNext(advance, TICK_DELAY_MS);
-    }, PRIORITY_PAUSE_MS);
-    return;
+  document.getElementById("verdict-panel").hidden = !frame.verdictVisible;
+  if (frame.verdictVisible) {
+    renderVerdict(frame);
   }
 
-  const message = messages[messagePointer];
-  appendChatBubble(message);
-  messagePointer += 1;
-  scheduleNext(function () { revealNextMessage(entry); }, MESSAGE_DELAY_MS);
+  updateControls();
+}
+
+function renderVerdict(frame) {
+  const verdictEl = document.getElementById("verdict-text");
+  verdictEl.innerHTML = "";
+  frame.verdictLines.forEach(function (line) {
+    const div = document.createElement("div");
+    div.textContent = line;
+    verdictEl.appendChild(div);
+  });
+
+  const verdictDiv = document.createElement("div");
+  verdictDiv.textContent = frame.verdictLine;
+  if (frame.verdictClass) {
+    verdictDiv.className = frame.verdictClass;
+  }
+  verdictEl.appendChild(verdictDiv);
 }
 
 function appendChatBubble(message) {
@@ -337,49 +454,128 @@ function appendChatBubble(message) {
   document.getElementById("chat-log").appendChild(bubble);
 }
 
-function showPriorityDecision() {
-  const negotiation = EPISODE_DATA.negotiation;
-  const text = negotiation.agreed
-    ? "Priority: " + negotiation.agreed_on
-    : "DEADLOCK - no agreement";
-  document.getElementById("priority-banner").textContent = text;
+function fillRobotCard(letter, robot) {
+  const card = document.getElementById("robot-" + letter + "-card");
+  card.querySelector(".policy").textContent = "policy: " + robot.policy;
+  card.querySelector(".situation").textContent = robot.situation;
+  card.querySelector(".urgency").textContent = "ground-truth urgency: " + robot.urgency + " (never shown to the policy)";
 }
 
-function showVerdict() {
-  const lines = [];
-  lines.push(EPISODE_DATA.completed ? "episode completed" : "did not complete");
-  lines.push("priority: " + (EPISODE_DATA.priority || "none decided"));
-  lines.push("should go first: " + (EPISODE_DATA.should_go_first || "tie, no ground truth"));
+function placeMarker(elementId, position, ownLanePercent) {
+  const marker = document.getElementById(elementId);
+  marker.style.left = positionToPercent(position) + "%";
+  marker.style.top = (isInZone(position) ? LANE_SHARED_PERCENT : ownLanePercent) + "%";
+}
 
-  const verdictEl = document.getElementById("verdict-text");
-  verdictEl.innerHTML = "";
-  lines.forEach(function (line) {
-    const div = document.createElement("div");
-    div.textContent = line;
-    verdictEl.appendChild(div);
-  });
+function goToFrame(index) {
+  frameIndex = Math.max(0, Math.min(index, frames.length - 1));
+  render(frames[frameIndex]);
+}
 
-  const verdictDiv = document.createElement("div");
-  if (EPISODE_DATA.correct === true) {
-    verdictDiv.textContent = "(correct)";
-    verdictDiv.className = "correct";
-  } else if (EPISODE_DATA.correct === false) {
-    verdictDiv.textContent = "(WRONG robot)";
-    verdictDiv.className = "wrong";
+function updateControls() {
+  document.getElementById("back-button").disabled = frameIndex === 0;
+  document.getElementById("next-button").disabled = frameIndex === frames.length - 1;
+  document.getElementById("play-pause-button").textContent = isPlaying ? "Pause" : "Play";
+}
+
+function stopPlaying() {
+  isPlaying = false;
+  if (playTimer !== null) {
+    clearTimeout(playTimer);
+    playTimer = null;
+  }
+}
+
+function playNextFrame() {
+  if (!isPlaying) {
+    return;
+  }
+  if (frameIndex >= frames.length - 1) {
+    stopPlaying();
+    updateControls();
+    return;
+  }
+  goToFrame(frameIndex + 1);
+  if (frameIndex < frames.length - 1) {
+    playTimer = setTimeout(playNextFrame, frames[frameIndex].delayMs || TICK_DELAY_MS);
   } else {
-    verdictDiv.textContent = "(no verdict possible)";
+    stopPlaying();
+    updateControls();
   }
-  verdictEl.appendChild(verdictDiv);
-
-  document.getElementById("verdict-panel").hidden = false;
-  document.getElementById("replay-button").hidden = false;
 }
 
-document.getElementById("replay-button").addEventListener("click", function () {
-  if (pendingTimer !== null) {
-    clearTimeout(pendingTimer);
+function startPlaying() {
+  if (frameIndex >= frames.length - 1) {
+    goToFrame(0);
   }
-  init();
+  isPlaying = true;
+  updateControls();
+  playTimer = setTimeout(playNextFrame, frames[frameIndex].delayMs || TICK_DELAY_MS);
+}
+
+function init() {
+  document.getElementById("scenario-title").textContent = EPISODE_DATA.scenario_id;
+  document.getElementById("mode-line").textContent =
+    "Robot A: " + EPISODE_DATA.robots.a.policy + "  |  Robot B: " + EPISODE_DATA.robots.b.policy;
+
+  fillRobotCard("a", EPISODE_DATA.robots.a);
+  fillRobotCard("b", EPISODE_DATA.robots.b);
+
+  const grid = EPISODE_DATA.grid;
+  const zoneStart = Math.min(...grid.corridor_zone);
+  const zoneEnd = Math.max(...grid.corridor_zone);
+  const zoneStartPercent = positionToPercent(zoneStart);
+  const zoneEndPercent = positionToPercent(zoneEnd);
+
+  const zoneEl = document.getElementById("corridor-zone");
+  zoneEl.style.left = zoneStartPercent + "%";
+  zoneEl.style.width = (zoneEndPercent - zoneStartPercent) + "%";
+
+  setLaneGuide("lane-guide-a-left", 0, zoneStartPercent, LANE_A_PERCENT);
+  setLaneGuide("lane-guide-a-right", zoneEndPercent, 100, LANE_A_PERCENT);
+  setLaneGuide("lane-guide-b-left", 0, zoneStartPercent, LANE_B_PERCENT);
+  setLaneGuide("lane-guide-b-right", zoneEndPercent, 100, LANE_B_PERCENT);
+
+  document.getElementById("a-boundary-marker").style.left = positionToPercent(grid.a_boundary) + "%";
+  document.getElementById("b-boundary-marker").style.left = positionToPercent(grid.b_boundary) + "%";
+
+  frames = buildFrames();
+  stopPlaying();
+  goToFrame(0);
+  // Deliberately does not auto-play - the user starts it with the Play
+  // button (or steps through with Next) once they're ready.
+}
+
+function setLaneGuide(elementId, fromPercent, toPercent, topPercent) {
+  const guide = document.getElementById(elementId);
+  guide.style.left = fromPercent + "%";
+  guide.style.width = (toPercent - fromPercent) + "%";
+  guide.style.top = topPercent + "%";
+}
+
+document.getElementById("back-button").addEventListener("click", function () {
+  stopPlaying();
+  goToFrame(frameIndex - 1);
+});
+
+document.getElementById("next-button").addEventListener("click", function () {
+  stopPlaying();
+  goToFrame(frameIndex + 1);
+});
+
+document.getElementById("play-pause-button").addEventListener("click", function () {
+  if (isPlaying) {
+    stopPlaying();
+    updateControls();
+  } else {
+    startPlaying();
+  }
+});
+
+document.getElementById("restart-button").addEventListener("click", function () {
+  stopPlaying();
+  goToFrame(0);
+  startPlaying();
 });
 
 init();

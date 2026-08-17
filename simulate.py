@@ -60,8 +60,9 @@ def main() -> int:
         max_negotiation_turns=args.max_negotiation_turns,
     )
 
-    for tick, a_position, b_position, a_action, b_action in result.log:
-        print(f"  tick {tick}: A at {a_position} ({a_action:4}), B at {b_position} ({b_action:4})")
+    for tick, a_position, b_position, a_action, b_action, priority in result.log:
+        priority_text = f", priority: {priority}" if priority is not None else ""
+        print(f"  tick {tick}: A at {a_position} ({a_action:4}), B at {b_position} ({b_action:4}){priority_text}")
 
     print("-" * 72)
     if result.negotiation is not None:

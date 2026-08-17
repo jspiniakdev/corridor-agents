@@ -71,7 +71,7 @@ def test_fcfs_episode_completes():
 
 def test_zone_occupancy_invariant_holds_across_an_fcfs_episode():
     result = run_episode(S, "stubborn", "never_yield", deliberate=False)
-    for _tick, a_position, b_position, _a_action, _b_action in result.log:
+    for _tick, a_position, b_position, _a_action, _b_action, _priority in result.log:
         assert not (a_position in CORRIDOR_ZONE and b_position in CORRIDOR_ZONE)
 
 
@@ -154,5 +154,5 @@ def test_negotiation_tick_matches_the_log_entry_it_belongs_to():
     not just some number that happens to exist."""
     result = run_episode(S, "stubborn", "stubborn", deliberate=True)
     assert result.negotiation_tick is not None
-    log_tick, _a_position, _b_position, _a_action, _b_action = result.log[result.negotiation_tick]
+    log_tick, _a_position, _b_position, _a_action, _b_action, _priority = result.log[result.negotiation_tick]
     assert log_tick == result.negotiation_tick

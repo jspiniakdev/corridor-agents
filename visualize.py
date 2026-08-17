@@ -72,7 +72,7 @@ def build_episode_data(scenario, policy_a_name, policy_b_name, result):
         correct = result.priority == should_go_first
 
     log = []
-    for tick, a_position, b_position, a_action, b_action in result.log:
+    for tick, a_position, b_position, a_action, b_action, priority in result.log:
         log.append(
             {
                 "tick": tick,
@@ -80,6 +80,7 @@ def build_episode_data(scenario, policy_a_name, policy_b_name, result):
                 "b_position": b_position,
                 "a_action": a_action,
                 "b_action": b_action,
+                "priority": priority,
             }
         )
 

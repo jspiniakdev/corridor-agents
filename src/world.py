@@ -79,14 +79,40 @@ class WorldState:
     log: list = field(default_factory=list)
 
 
+def _next_position(robot_state: RobotState, action: str) -> int:
+    return robot_state.position + robot_state.direction if action == "move" else robot_state.position
+
+
 def reactive_filter(state: WorldState, a_action: str, b_action: str) -> tuple[str, str]:
-    """The safety net. Recomputes whether the two tentative actions would put
-    both robots in the corridor zone at once, independently of whatever
-    decided those actions - so a bug upstream can never cause a real
-    collision, at worst it causes one robot to wait when it didn't strictly
-    need to."""
-    a_next = state.a.position + state.a.direction if a_action == "move" else state.a.position
-    b_next = state.b.position + state.b.direction if b_action == "move" else state.b.position
+    """The safety net. Recomputes whether these actions are safe,
+    independently of whatever decided them - so a bug upstream can never
+    cause a real collision, at worst it causes one robot to wait when it
+    didn't strictly need to.
+
+    Two separate checks, both needed:
+
+    1. Entry gate - a robot may only START entering the corridor zone (the
+       one-lane bridge) if the other robot isn't currently anywhere in it,
+       even if the other is leaving on this same tick. Without this, one
+       robot could enter from one end while the other exits from the other
+       end in the same tick - passing through each other on the bridge.
+    2. Backstop - never let both robots' next positions land in the zone at
+       once, however that was decided. Covers e.g. both trying to enter
+       simultaneously while the zone is genuinely empty.
+    """
+    a_next = _next_position(state.a, a_action)
+    b_next = _next_position(state.b, b_action)
+
+    a_entering = a_next in CORRIDOR_ZONE and state.a.position not in CORRIDOR_ZONE
+    b_entering = b_next in CORRIDOR_ZONE and state.b.position not in CORRIDOR_ZONE
+
+    if a_entering and state.b.position in CORRIDOR_ZONE:
+        a_action = "wait"
+    if b_entering and state.a.position in CORRIDOR_ZONE:
+        b_action = "wait"
+
+    a_next = _next_position(state.a, a_action)
+    b_next = _next_position(state.b, b_action)
 
     if a_next in CORRIDOR_ZONE and b_next in CORRIDOR_ZONE:
         if state.a.in_zone and not state.b.in_zone:
@@ -229,7 +255,7 @@ def step(state: WorldState, deliberate: bool, max_negotiation_turns: int) -> Wor
     a_action, b_action = executive_decide(state, deliberate, max_negotiation_turns)
     a_action, b_action = reactive_filter(state, a_action, b_action)
     apply(state, a_action, b_action)
-    state.log.append((state.tick, state.a.position, state.b.position, a_action, b_action))
+    state.log.append((state.tick, state.a.position, state.b.position, a_action, b_action, state.priority))
     state.tick += 1
     return state
 

@@ -52,6 +52,19 @@ def test_simultaneous_entry_attempt_blocks_both():
     assert b_action == "wait"
 
 
+def test_swap_through_the_bridge_is_blocked():
+    """A regression test for a real gap: A entering the zone from one end
+    while B exits from the other end, in the same tick, used to be allowed
+    (neither robot's next position alone was 'both in the zone', so the old
+    check missed it) - passing them through each other on the one-lane
+    bridge. A must wait; B's exit isn't blocked, since leaving the bridge
+    doesn't need to check anything."""
+    state = make_state(a_position=2, b_position=3)  # A about to enter, B about to exit
+    a_action, b_action = reactive_filter(state, "move", "move")
+    assert a_action == "wait"
+    assert b_action == "move"
+
+
 def test_naive_always_move_robots_never_collide():
     """Even with zero coordination - both robots always attempt to move -
     the reactive layer alone must guarantee they're never both in the zone
