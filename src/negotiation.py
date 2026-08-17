@@ -134,8 +134,11 @@ because you hold firm.
 
 You and {other} have {turns_left} exchanges left, combined, before this
 negotiation times out with nothing decided - which is the worst outcome for
-both of you. Agree as soon as you reasonably can. Dragging this out helps no
-one.
+both of you. Base how hard you push on your OWN situation, not on whether
+{other} justifies theirs: if your situation is genuinely urgent, hold your
+position even if {other} never explains its own claim. If you have little
+or nothing at stake, don't keep insisting just because {other} didn't give
+you a good reason - agree and move on. Dragging this out helps no one.
 
 PRIVATE - {other} cannot see this unless you choose to say it:
 {situation}
