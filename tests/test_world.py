@@ -135,3 +135,24 @@ def test_fcfs_mode_is_unaffected_by_sensing_early():
     assert state.negotiation_outcome is None
     assert a_policy.calls == 0
     assert b_policy.calls == 0
+
+
+def test_negotiation_tick_is_recorded_at_the_moment_negotiation_fires():
+    state = make_state(a_position=A_BOUNDARY, b_position=B_BOUNDARY)
+    executive_decide(state, deliberate=True, max_negotiation_turns=6)
+    assert state.negotiation_tick == 0  # state.tick was 0 when make_state() built it
+
+
+def test_negotiation_tick_is_none_when_no_standoff_happens():
+    result = run_episode(S, "stubborn", "never_yield", deliberate=False)
+    assert result.negotiation_tick is None
+
+
+def test_negotiation_tick_matches_the_log_entry_it_belongs_to():
+    """This alignment is what the visualizer actually depends on: the tick
+    a negotiation happened on must be a real index into the episode's log,
+    not just some number that happens to exist."""
+    result = run_episode(S, "stubborn", "stubborn", deliberate=True)
+    assert result.negotiation_tick is not None
+    log_tick, _a_position, _b_position, _a_action, _b_action = result.log[result.negotiation_tick]
+    assert log_tick == result.negotiation_tick

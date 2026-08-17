@@ -51,6 +51,14 @@ python world_eval.py          # deterministic + FCFS cases, free, instant
 python world_eval.py --full   # also the deliberate llm-involving cases - costs money
 ```
 
+To watch one episode as a tick-by-tick HTML replay:
+
+```bash
+python visualize.py                          # writes experiments/results/visualization.html
+python visualize.py --a llm --b llm          # same, with real negotiation dialog
+```
+Open the output file directly in a browser - no server needed.
+
 Tests need no API key and run in milliseconds:
 
 ```bash
@@ -70,9 +78,11 @@ run.py                       CLI for one negotiation
 eval.py                      CLI for the measurement sweep (Phase 2)
 simulate.py                  CLI for one grid episode (Phase 3)
 world_eval.py                CLI for the grid-episode measurement sweep (Phase 3)
+visualize.py                 CLI: builds a tick-by-tick HTML replay of one episode
+visualize_template.html      the replay page's HTML/CSS/JS, data injected by visualize.py
 experiments/cases.csv        which scenario x policy pairings to run (Phase 2)
 experiments/world_cases.csv  which scenario/policy/deliberate-mode combos to run (Phase 3)
-experiments/results/         eval.py's and world_eval.py's output, regenerable, gitignored
+experiments/results/         eval.py's/world_eval.py's/visualize.py's output, gitignored
 tests/                       deterministic tests, zero API calls
 ```
 
@@ -130,6 +140,12 @@ tests/                       deterministic tests, zero API calls
   completion rate, how often a genuine negotiation happened (vs. priority
   being claimed solo), correctness rate, and average ticks used, across 50
   free episodes (45 deliberate deterministic pairings + 5 FCFS baselines).
+- **A visualizer, ahead of schedule (D13).** `PLAN.md` §7 deferred this, but
+  Phase 3 made it cheap and worth having: `visualize.py` writes one
+  self-contained HTML file per episode (`visualize_template.html` + inlined
+  data, no server, no new dependency) that animates positions tick by tick
+  and pauses to reveal the negotiation dialog, message by message, exactly
+  when it happened.
 
 ## Next: Phase 4 — split into separate processes
 

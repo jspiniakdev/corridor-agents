@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<!--
+  This is a TEMPLATE, not a page meant to be opened directly. The
+  EPISODE_DATA placeholder below is filled in by visualize.py before this
+  file is written out to experiments/results/visualization.html - opened
+  as-is, the const declaration below has an empty right-hand side and the
+  page won't work.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Corridor Agents - Episode Replay</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 900px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+    color: #1f2937;
+    background: #f9fafb;
+  }
+
+  h1, h2 { margin-bottom: 0.25rem; }
+
+  #mode-line {
+    color: #6b7280;
+    margin-bottom: 1.5rem;
+  }
+
+  #robot-info {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+
+  .robot-card {
+    flex: 1;
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    background: white;
+    border-left: 5px solid;
+  }
+
+  #robot-a-card { border-left-color: #2563eb; }
+  #robot-b-card { border-left-color: #d97706; }
+
+  .robot-card h2 { font-size: 1rem; }
+  .robot-card .policy { color: #6b7280; font-size: 0.85rem; margin-bottom: 0.5rem; }
+  .robot-card .situation { font-size: 0.9rem; margin-bottom: 0.5rem; }
+  .robot-card .urgency { font-size: 0.8rem; color: #6b7280; }
+
+  #track-wrapper {
+    background: white;
+    border-radius: 8px;
+    padding: 1.5rem 1rem 1rem 1rem;
+    margin-bottom: 1.5rem;
+  }
+
+  #tick-label {
+    font-weight: bold;
+    margin-bottom: 0.75rem;
+  }
+
+  #track {
+    position: relative;
+    height: 90px;
+    margin: 0 1rem;
+    background: #e5e7eb;
+    border-radius: 6px;
+  }
+
+  #corridor-zone {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: rgba(220, 38, 38, 0.15);
+  }
+
+  .boundary {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 0;
+    border-left: 2px dashed #9ca3af;
+  }
+
+  .robot-marker {
+    position: absolute;
+    top: 50%;
+    width: 34px;
+    height: 34px;
+    line-height: 34px;
+    text-align: center;
+    border-radius: 50%;
+    color: white;
+    font-weight: bold;
+    transform: translate(-50%, -50%);
+    transition: left 0.9s linear;
+  }
+
+  #marker-a { background: #2563eb; }
+  #marker-b { background: #d97706; }
+
+  #action-log {
+    margin-top: 0.75rem;
+    color: #6b7280;
+    font-size: 0.9rem;
+  }
+
+  #dialogue-panel, #verdict-panel {
+    background: white;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
+  }
+
+  #chat-log {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .message {
+    max-width: 80%;
+    padding: 0.5rem 0.75rem;
+    border-radius: 8px;
+    font-size: 0.9rem;
+  }
+
+  .message.speaker-a { background: #dbeafe; align-self: flex-start; }
+  .message.speaker-b { background: #fef3c7; align-self: flex-end; }
+
+  .message .speaker-name { font-weight: bold; font-size: 0.8rem; display: block; }
+
+  #priority-banner {
+    font-weight: bold;
+  }
+
+  #verdict-text div { margin-bottom: 0.25rem; }
+
+  .correct { color: #16a34a; font-weight: bold; }
+  .wrong { color: #dc2626; font-weight: bold; }
+
+  #replay-button {
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    border: none;
+    background: #2563eb;
+    color: white;
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1 id="scenario-title"></h1>
+  <div id="mode-line"></div>
+</header>
+
+<section id="robot-info">
+  <div class="robot-card" id="robot-a-card">
+    <h2>Robot A</h2>
+    <div class="policy"></div>
+    <div class="situation"></div>
+    <div class="urgency"></div>
+  </div>
+  <div class="robot-card" id="robot-b-card">
+    <h2>Robot B</h2>
+    <div class="policy"></div>
+    <div class="situation"></div>
+    <div class="urgency"></div>
+  </div>
+</section>
+
+<section id="track-wrapper">
+  <div id="tick-label">tick -</div>
+  <div id="track">
+    <div id="corridor-zone"></div>
+    <div class="boundary" id="a-boundary-marker"></div>
+    <div class="boundary" id="b-boundary-marker"></div>
+    <div class="robot-marker" id="marker-a">A</div>
+    <div class="robot-marker" id="marker-b">B</div>
+  </div>
+  <div id="action-log"></div>
+</section>
+
+<section id="dialogue-panel" hidden>
+  <h2>Negotiation</h2>
+  <div id="chat-log"></div>
+  <div id="priority-banner"></div>
+</section>
+
+<section id="verdict-panel" hidden>
+  <h2>Result</h2>
+  <div id="verdict-text"></div>
+</section>
+
+<button id="replay-button" hidden>Replay</button>
+
+<script>
+const EPISODE_DATA = /*__EPISODE_DATA__*/;
+
+const TICK_DELAY_MS = 1000;
+const MESSAGE_DELAY_MS = 900;
+const PRIORITY_PAUSE_MS = 1500;
+
+let tickPointer = 0;
+let messagePointer = 0;
+let pendingTimer = null;
+
+function positionToPercent(position) {
+  const grid = EPISODE_DATA.grid;
+  return ((position - grid.min_position) / (grid.max_position - grid.min_position)) * 100;
+}
+
+function init() {
+  document.getElementById("scenario-title").textContent = EPISODE_DATA.scenario_id;
+  document.getElementById("mode-line").textContent =
+    "Robot A: " + EPISODE_DATA.robots.a.policy + "  |  Robot B: " + EPISODE_DATA.robots.b.policy;
+
+  fillRobotCard("a", EPISODE_DATA.robots.a);
+  fillRobotCard("b", EPISODE_DATA.robots.b);
+
+  const grid = EPISODE_DATA.grid;
+  const zoneStart = Math.min(...grid.corridor_zone);
+  const zoneEnd = Math.max(...grid.corridor_zone);
+  const zoneEl = document.getElementById("corridor-zone");
+  zoneEl.style.left = positionToPercent(zoneStart) + "%";
+  zoneEl.style.width = (positionToPercent(zoneEnd) - positionToPercent(zoneStart)) + "%";
+
+  document.getElementById("a-boundary-marker").style.left = positionToPercent(grid.a_boundary) + "%";
+  document.getElementById("b-boundary-marker").style.left = positionToPercent(grid.b_boundary) + "%";
+
+  placeMarker("marker-a", EPISODE_DATA.robots.a.start_position);
+  placeMarker("marker-b", EPISODE_DATA.robots.b.start_position);
+
+  document.getElementById("tick-label").textContent = "tick -";
+  document.getElementById("action-log").textContent = "";
+  document.getElementById("dialogue-panel").hidden = true;
+  document.getElementById("chat-log").innerHTML = "";
+  document.getElementById("priority-banner").textContent = "";
+  document.getElementById("verdict-panel").hidden = true;
+  document.getElementById("replay-button").hidden = true;
+
+  tickPointer = 0;
+  messagePointer = 0;
+
+  scheduleNext(advance, TICK_DELAY_MS);
+}
+
+function fillRobotCard(letter, robot) {
+  const card = document.getElementById("robot-" + letter + "-card");
+  card.querySelector(".policy").textContent = "policy: " + robot.policy;
+  card.querySelector(".situation").textContent = robot.situation;
+  card.querySelector(".urgency").textContent = "ground-truth urgency: " + robot.urgency + " (never shown to the policy)";
+}
+
+function placeMarker(elementId, position) {
+  document.getElementById(elementId).style.left = positionToPercent(position) + "%";
+}
+
+function scheduleNext(fn, delayMs) {
+  pendingTimer = setTimeout(fn, delayMs);
+}
+
+function advance() {
+  if (tickPointer >= EPISODE_DATA.log.length) {
+    showVerdict();
+    return;
+  }
+
+  const entry = EPISODE_DATA.log[tickPointer];
+
+  if (EPISODE_DATA.negotiation !== null && EPISODE_DATA.negotiation.tick === entry.tick) {
+    beginNegotiation(entry);
+    return;
+  }
+
+  applyTick(entry);
+  tickPointer += 1;
+  scheduleNext(advance, TICK_DELAY_MS);
+}
+
+function applyTick(entry) {
+  placeMarker("marker-a", entry.a_position);
+  placeMarker("marker-b", entry.b_position);
+  document.getElementById("tick-label").textContent = "tick " + entry.tick;
+  document.getElementById("action-log").textContent =
+    "A: " + entry.a_action + "   B: " + entry.b_action;
+}
+
+function beginNegotiation(entry) {
+  document.getElementById("dialogue-panel").hidden = false;
+  document.getElementById("chat-log").innerHTML = "";
+  document.getElementById("priority-banner").textContent = "";
+  messagePointer = 0;
+  revealNextMessage(entry);
+}
+
+function revealNextMessage(entry) {
+  const messages = EPISODE_DATA.negotiation.messages;
+
+  if (messagePointer >= messages.length) {
+    showPriorityDecision();
+    scheduleNext(function () {
+      document.getElementById("dialogue-panel").hidden = true;
+      applyTick(entry);
+      tickPointer += 1;
+      scheduleNext(advance, TICK_DELAY_MS);
+    }, PRIORITY_PAUSE_MS);
+    return;
+  }
+
+  const message = messages[messagePointer];
+  appendChatBubble(message);
+  messagePointer += 1;
+  scheduleNext(function () { revealNextMessage(entry); }, MESSAGE_DELAY_MS);
+}
+
+function appendChatBubble(message) {
+  const bubble = document.createElement("div");
+  const isA = message.speaker === EPISODE_DATA.robots.a.name;
+  bubble.className = "message " + (isA ? "speaker-a" : "speaker-b");
+
+  const speakerLabel = document.createElement("span");
+  speakerLabel.className = "speaker-name";
+  speakerLabel.textContent = message.speaker + " (" + message.intent + ")";
+  bubble.appendChild(speakerLabel);
+
+  const text = document.createElement("span");
+  text.textContent = message.text;
+  bubble.appendChild(text);
+
+  document.getElementById("chat-log").appendChild(bubble);
+}
+
+function showPriorityDecision() {
+  const negotiation = EPISODE_DATA.negotiation;
+  const text = negotiation.agreed
+    ? "Priority: " + negotiation.agreed_on
+    : "DEADLOCK - no agreement";
+  document.getElementById("priority-banner").textContent = text;
+}
+
+function showVerdict() {
+  const lines = [];
+  lines.push(EPISODE_DATA.completed ? "episode completed" : "did not complete");
+  lines.push("priority: " + (EPISODE_DATA.priority || "none decided"));
+  lines.push("should go first: " + (EPISODE_DATA.should_go_first || "tie, no ground truth"));
+
+  const verdictEl = document.getElementById("verdict-text");
+  verdictEl.innerHTML = "";
+  lines.forEach(function (line) {
+    const div = document.createElement("div");
+    div.textContent = line;
+    verdictEl.appendChild(div);
+  });
+
+  const verdictDiv = document.createElement("div");
+  if (EPISODE_DATA.correct === true) {
+    verdictDiv.textContent = "(correct)";
+    verdictDiv.className = "correct";
+  } else if (EPISODE_DATA.correct === false) {
+    verdictDiv.textContent = "(WRONG robot)";
+    verdictDiv.className = "wrong";
+  } else {
+    verdictDiv.textContent = "(no verdict possible)";
+  }
+  verdictEl.appendChild(verdictDiv);
+
+  document.getElementById("verdict-panel").hidden = false;
+  document.getElementById("replay-button").hidden = false;
+}
+
+document.getElementById("replay-button").addEventListener("click", function () {
+  if (pendingTimer !== null) {
+    clearTimeout(pendingTimer);
+  }
+  init();
+});
+
+init();
+</script>
+
+</body>
+</html>

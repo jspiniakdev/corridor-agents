@@ -30,7 +30,7 @@ HTTP service, with homemade messaging. See `PLAN.md` §5.
 
 ```bash
 source .venv/bin/activate        # Python 3.13; required in each new shell
-python -m pytest tests/ -q       # 43 tests, no API calls, ~0.04s
+python -m pytest tests/ -q       # 54 tests, no API calls, ~0.05s
 python run.py                    # one negotiation, deterministic policies
 python run.py --a llm --b llm    # needs: cp .env.example .env && source .env
 python eval.py                   # measurement sweep, deterministic cases only
@@ -39,6 +39,7 @@ python simulate.py               # one grid episode, deliberate, deterministic
 python simulate.py --no-deliberate --a llm --b llm  # FCFS baseline vs. negotiation
 python world_eval.py             # grid-episode measurement sweep, free cases only
 python world_eval.py --full      # also runs the deliberate llm-involving cases
+python visualize.py              # tick-by-tick HTML replay of one episode
 ```
 
 ## The one design principle

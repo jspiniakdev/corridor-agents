@@ -75,6 +75,7 @@ class WorldState:
     tick: int = 0
     priority: str | None = None  # once resolved, the name of the robot that goes first
     negotiation_outcome: object = None  # the negotiation.Outcome, once one has happened
+    negotiation_tick: int | None = None  # the tick negotiate() was actually called on, if any
     log: list = field(default_factory=list)
 
 
@@ -144,6 +145,7 @@ def _negotiate_priority(state: WorldState, max_negotiation_turns: int) -> str | 
     state.b.robot.situation = compose_observation(
         state.b.position, state.b.direction, state.a.position, CORRIDOR_ZONE, SENSOR_RANGE, state.scenario.b_situation
     )
+    state.negotiation_tick = state.tick
     outcome = negotiate(state.a.robot, state.b.robot, max_turns=max_negotiation_turns)
     state.negotiation_outcome = outcome
     return outcome.agreed_on
@@ -239,6 +241,7 @@ class EpisodeResult:
     completed: bool
     priority: str | None = None  # who was given priority, however it was decided
     negotiation: object = None  # the negotiation.Outcome, if a standoff happened
+    negotiation_tick: int | None = None  # which tick the standoff happened on, if any
 
 
 def run_episode(
@@ -255,11 +258,11 @@ def run_episode(
 
     while state.tick < max_ticks:
         if state.a.reached_target and state.b.reached_target:
-            return EpisodeResult(state.log, state.tick, True, state.priority, state.negotiation_outcome)
+            return EpisodeResult(state.log, state.tick, True, state.priority, state.negotiation_outcome, state.negotiation_tick)
 
         if state.negotiation_outcome is not None and not state.negotiation_outcome.agreed:
             break  # terminal deadlock - no point burning the remaining ticks
 
         step(state, deliberate, max_negotiation_turns)
 
-    return EpisodeResult(state.log, state.tick, False, state.priority, state.negotiation_outcome)
+    return EpisodeResult(state.log, state.tick, False, state.priority, state.negotiation_outcome, state.negotiation_tick)

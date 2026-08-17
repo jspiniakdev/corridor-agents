@@ -314,3 +314,33 @@ deadlock now resolve correctly.
 **Would change our mind:** nothing foreseen - `REJECT` added no real
 information `PROPOSE` couldn't already carry, since `goes_first` was always
 the field that mattered.
+
+---
+
+## D13 — Build a visualizer now, ahead of PLAN.md §7's own schedule
+
+**Decided:** add a single-episode HTML replay (`visualize.py` +
+`visualize_template.html`) that animates a grid episode tick by tick,
+pausing to show the negotiation dialog when one happens.
+
+**Rejected:** waiting, per `PLAN.md` §7's explicit "not doing yet" list:
+`❌ A web UI or visualizer — this is a reward, not a prerequisite`.
+
+**Why we're crossing that line now anyway:** that line was written when
+there was nothing worth looking at - Phase 1/2 had no world, no movement,
+nothing spatial to animate. Phase 3 changed that: there's now real per-tick
+grid state and, when a genuine standoff happens, a full negotiation
+transcript. And it costs nothing infrastructurally - a pre-computed replay
+(chosen deliberately over a live server) is one self-contained HTML file
+with the episode data inlined, no server process, no new dependency,
+consistent with every other phase's "no infra until it's earned" pattern.
+This isn't the web UI/dashboard §7 was deferring (multi-episode, persistent,
+a real frontend stack) - it's a single-episode debugging aid built the same
+way everything else in this project has been: boring, additive, zero new
+infrastructure.
+
+**Would change our mind:** if this grows into needing a live server, a
+build step, or a JS framework to stay useful - at that point it would
+actually be the thing §7 deferred, and should wait for whatever phase
+Cloud Run/A2A get established, rather than becoming a second, ungoverned
+infra track.
