@@ -16,7 +16,9 @@ The two ideas from the plan that shape this file:
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from typing import Protocol
 
@@ -118,6 +120,7 @@ class Stubborn:
 # --- the LLM policy ---------------------------------------------------------
 
 MODEL = "claude-sonnet-5"
+LOG_PATH = "experiments/results/llm_calls.log"
 
 SYSTEM = """You are {name}, an autonomous warehouse robot.
 
@@ -202,9 +205,22 @@ class LLMPolicy:
             tools=[self._tool(me.name, other.name)],
             tool_choice={"type": "tool", "name": "respond"},
         )
-        print(f"[LLM raw] {me.name}: {reply.content}")  # debugging: the exact reply from the model
+        raw_line = f"[LLM raw] {me.name}: {reply.content}"
+        print(raw_line)  # debugging: the exact reply from the model
+        self._log(raw_line)
         call = next(block for block in reply.content if block.type == "tool_use")
         return self._to_message(me, other, call.input)
+
+    @staticmethod
+    def _log(line: str) -> None:
+        """Append one debug line to experiments/results/llm_calls.log, so
+        the raw model output survives after the terminal scrolls away.
+        Appends forever across every run - nothing truncates this file
+        automatically, so delete it by hand if it gets too big."""
+        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        with open(LOG_PATH, "a") as f:
+            f.write(f"{timestamp} {line}\n")
 
     @staticmethod
     def _to_message(me: Robot, other: Robot, tool_input: dict) -> Message:
