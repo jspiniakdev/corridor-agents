@@ -210,9 +210,29 @@ def build_episode_data(scenario, policy_a_name, policy_b_name, grid, entries, me
         }
 
     raw_log = []
+    a_seen = False
+    b_seen = False
     for i, entry in enumerate(entries):
-        a_action = entry["resolved"] if entry["side"] == "a" else "wait"
-        b_action = entry["resolved"] if entry["side"] == "b" else "wait"
+        # The world log has one row per propose_action call, from whichever
+        # side made it (D17/D20) - a robot that hasn't logged its own first
+        # call yet has no row to speak of at all, not a "wait" decision.
+        # Without this distinction, a robot whose process simply started a
+        # beat later than its peer's (an ordinary side effect of how two
+        # separate OS processes get launched, not a real negotiation delay)
+        # looks indistinguishable from one that reached its boundary and
+        # deliberately chose to hold - caught directly from a user reading
+        # a replay and asking why Robot A appeared "stuck" at the start
+        # when nothing in decide_movement() should have blocked it (D28).
+        if entry["side"] == "a":
+            a_action = entry["resolved"]
+            a_seen = True
+        else:
+            a_action = "wait" if a_seen else None
+        if entry["side"] == "b":
+            b_action = entry["resolved"]
+            b_seen = True
+        else:
+            b_action = "wait" if b_seen else None
         elapsed_ms = 0 if i == 0 else round((entry["timestamp"] - entries[i - 1]["timestamp"]) * 1000)
         raw_log.append(
             {

@@ -1196,3 +1196,40 @@ legitimately hold two *independent* negotiations at once (not the case
 here - there are only ever two robots and one shared corridor, so any
 resolved standoff is necessarily the same standoff any other in-flight
 attempt was also trying to resolve).
+
+## D28 — The network visualizer no longer shows "wait" for a robot that simply hasn't started yet
+
+**Decided:** `visualize_network.py`'s `build_episode_data()` now tracks,
+per side, whether that side has logged its own first `propose_action`
+row yet. Before it does, that side's `a_action`/`b_action` is `null`, not
+`"wait"` - `visualize_template.html` renders it as "not started" instead
+of a decision. `collapse_idle_runs` (D25) is unaffected - `null` doesn't
+match its `"wait"` check, so these rows are never folded into an idle
+run, which is correct: there's nothing to collapse, they're not real
+idle polls.
+
+**Why:** the world log has one row per `propose_action` call, from
+whichever side made it (D17/D20) - a robot that hasn't logged a call yet
+has no row at all, not a "wait" row. `build_episode_data()` previously
+filled in `"wait"` for whichever side *didn't* act on a given row,
+regardless of whether that side had ever acted at all - indistinguishable
+from a robot that reached its boundary and genuinely chose to hold.
+Caught directly: the user read a replay and asked why Robot A looked
+"stuck" doing nothing for the first couple of rows when nothing in
+`decide_movement()` should block it (A wasn't even at its boundary yet).
+The honest answer: A's process is started slightly after B's in every
+documented run command (the world, then B, then A) - two separate OS
+processes never start at literally the same instant - so B logs one or
+two of its own early polls before A's process has made its very first
+call. `decide_movement()` was never broken; A's actual first decision,
+once made, was `"move"`, immediately.
+
+**Verified:** a fresh run's log shows rows 0-1 as `a_action: null` (B
+moving alone, matching B's own two early polls) and row 2 as A's real
+first decision (`"move"`, correctly - A wasn't at its boundary). Full
+suite (98 tests) and `simulate.py`/`world_eval.py` regression unaffected.
+
+**Would change our mind:** if a future run command ever starts both
+processes genuinely simultaneously (unlikely, and not something this
+project has a reason to pursue) - the gap would just shrink to zero rows
+most of the time, not need reverting.

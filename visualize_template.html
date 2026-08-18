@@ -457,8 +457,13 @@ function render(frame) {
   placeMarker("marker-b", frame.bPosition, LANE_B_PERCENT);
   document.getElementById("tick-label").textContent = frame.tickLabel;
   document.getElementById("current-priority").textContent = "priority: " + (frame.currentPriority || "undecided");
+  // a_action/b_action can be null (not "wait") for a side that hasn't
+  // logged its own first move yet - an ordinary side effect of two
+  // separate OS processes starting a beat apart, not a real decision
+  // (D28). Rendered as "not started" so it isn't mistaken for one.
+  const describeAction = (action) => (action === null || action === undefined ? "not started" : action);
   document.getElementById("action-log").textContent =
-    (frame.aAction || frame.bAction) ? "A: " + frame.aAction + "   B: " + frame.bAction : "";
+    (frame.aAction || frame.bAction) ? "A: " + describeAction(frame.aAction) + "   B: " + describeAction(frame.bAction) : "";
 
   document.getElementById("dialogue-panel").hidden = !frame.dialogueVisible;
   const chatLog = document.getElementById("chat-log");

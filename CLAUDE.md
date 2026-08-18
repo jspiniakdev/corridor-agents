@@ -85,7 +85,11 @@ synchronous API calls (D15) block the negotiating robot's whole process
 for several real seconds, during which the *other* robot's process keeps
 polling every ~0.2s and logging no-op rows; without collapsing, a replay
 could show dozens of identical empty frames between "establishing comms"
-and the actual dialogue.
+and the actual dialogue. **(D28)** a robot that hasn't logged its own
+first `propose_action` call yet (its OS process simply started a beat
+after its peer's) now shows as "not started," not "wait" - the two used
+to be indistinguishable, making a robot that hadn't spoken yet look like
+one deliberately holding at its boundary.
 
 **The grid was briefly widened and made asymmetric (D21), then reverted
 (D26).** `MIN_POSITION`/`MAX_POSITION` are back to 1/8, `--max-ticks`
