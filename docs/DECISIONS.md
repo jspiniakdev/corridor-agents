@@ -850,3 +850,349 @@ correctly falls back to the old tick-based behavior for it, unchanged.
 per-message timestamps (e.g., to show LLM thinking time in the replay
 the same way the live streaming heartbeat does) - worth extending the
 dialogue reveal to use real elapsed time too, at that point.
+
+---
+
+## D21 — The grid is now deliberately asymmetric (MIN_POSITION..MAX_POSITION, 1..24)
+
+**Decided:** `world.py` gained real `MIN_POSITION`/`MAX_POSITION`
+constants (1 and 24, replacing three separate hardcoded "1"/"8" literals
+in `world_server.py`, `visualize.py`, and `visualize_network.py`).
+`A_START`/`A_BOUNDARY` are unchanged (A is still 1 step from its
+boundary); `B_START`/`B_TARGET` moved out to the new far end, so B is now
+~22 steps from its boundary instead of 2. `SENSOR_RANGE` was recomputed
+(6 → 22) to preserve the exact invariant D12 established and
+`tests/test_world.py` already encoded: the max possible gap from A's
+boundary is exactly `SENSOR_RANGE`, so a real standoff is always sensed
+by the time A arrives, never missed.
+
+**Why:** requested directly, to finally exercise something this project
+could never observe live before - Phase 3's symmetric grid guaranteed
+both robots reached their boundaries closely enough in time that a real
+async negotiation with meaningfully different arrival timing never
+naturally occurred. Widening (rather than narrowing) `SENSOR_RANGE` was
+a deliberate choice, not the only option - keeping it narrow instead
+would have let A claim priority for free the instant it arrives (B not
+yet sensed), the "arrived alone" path D19 already flagged as never
+naturally reachable. Both are legitimate experiments; this one preserves
+today's "always negotiate on a real conflict" behavior and is what got
+built.
+
+**Verified:** `world_eval.py`'s completion rate (45/50), negotiation rate
+(45/50), and correctness (13/27) are byte-for-byte identical to the
+pre-change baseline - only `avg_ticks_used` grew (10.2 → 31.4), confirming
+the grid-length change is fully orthogonal to negotiation correctness, as
+intended. `simulate.py`/`visualize.py`'s default `--max-ticks` (30 → 90)
+and `world.py`'s own `run_episode` default needed bumping too, or a
+default run no longer completes within budget - a real, easy-to-miss
+consequence of a longer grid, caught by actually running it rather than
+assumed.
+
+**Would change our mind:** if a future experiment wants the *narrow*
+sensor range instead (to finally exercise the "arrived alone, zero
+negotiation" path) - that's a one-line `SENSOR_RANGE` change away, not a
+reason to revert this decision, just a different experiment to run on
+top of it.
+
+---
+
+## D22 — Real timestamps replace a broken movement-based heuristic for "when did the negotiation happen"
+
+**Decided:** `agent.py` now records two real `time.time()` timestamps per
+negotiation - `comms_established_at` (when the task actually opened -
+either when a robot starts dialing, captured right before
+`asyncio.create_task`, or when `on_task_started` fires on the responder
+side) and `resolved_at` (when `write_negotiation_trace` runs) - both
+written into `negotiation_trace.json` alongside the messages.
+`visualize_network.py` correlates both against `world_server.py`'s own
+per-entry timestamps (D20) via `find_step_at_or_after()` to find the
+right world-log step for each, and gets the negotiation's *winner*
+directly from `negotiation.check_agreement()` - the same function that
+decided it live - rather than inferring either fact from movement.
+
+**Rejected, having actually shipped it first:** D19's original heuristic
+- "priority becomes known at the first log entry where the winner moves
+off its own boundary." Caught directly by the user reviewing a real
+replay on the new asymmetric grid (D21): Robot B won a `routine_vs_medical`
+negotiation that a live console log showed resolving within the first
+several seconds (Robot A dialing almost immediately upon reaching its
+own boundary), but the visualizer displayed the negotiation dialogue at
+step 42 of 72 - because B, the winner, doesn't reach *its own* boundary
+until it finishes an unrelated 18-step walk from `B_START`. The heuristic
+conflated "when B is finally allowed to cross" with "when the negotiation
+happened" - true by coincidence on the old symmetric grid, false as soon
+as the winner could be arbitrarily far from its own boundary when it won.
+
+**Why the fix is real timestamps, not a smarter heuristic:** there's no
+way to correctly infer negotiation timing from movement alone once the
+winner and "who's about to cross a boundary" can be different robots
+entirely. The two channels (world, negotiation) already don't share a
+clock (D19's own caveat) - the actual fix is to stop pretending movement
+can substitute for that and instead give each channel its own real clock
+reading, then correlate the readings directly.
+
+**New in the replay, from the same fix:** an "establishing comms" marker
+(reusing the existing priority-banner element, no new DOM/CSS) now shows
+at `comms_step`, separately from the dialogue-reveal at the resolution
+step - visible proof the negotiation is bracketed by two distinct real
+moments, not one guessed one. Skipped when both land on the same step
+(a fast negotiation with nothing to show in between).
+
+**Verified:** the exact scenario that exposed the bug now shows
+`comms_step: 10` (matching the live console log's near-immediate dial)
+and a resolution step 33 steps later (matching a real multi-turn LLM
+exchange's actual latency) - both numbers now tell a story consistent
+with what the live run actually printed, instead of contradicting it.
+
+**Would change our mind:** if clock skew ever became a real concern (a
+truly distributed deployment across machines, not one laptop) -
+`time.time()` correlation between processes would need NTP-level care it
+doesn't have today. Not a concern for this project's current scope.
+
+---
+
+## D23 — Jitter only when a race is actually plausible
+
+**Decided:** `world_server.py`'s `get_observation()` gained
+`other_distance_to_boundary` - how far the other robot currently is from
+its own boundary, computable only when it's sensed at all. `agent.py`'s
+dial-scheduling logic (`should_skip_jitter()`) now skips the jitter delay
+entirely and dials immediately whenever that distance exceeds
+`RACE_PLAUSIBLE_DISTANCE` (5 steps) - jitter still applies exactly as
+before (D18) whenever the other robot is close enough that it might
+plausibly also be about to reach its own trigger condition.
+
+**Why:** raised directly, from watching a real replay - D21's asymmetric
+grid meant `SENSOR_RANGE` now senses the other robot from up to 22 steps
+away, but the jitter delay (D18) was still applying unconditionally
+every time, even though there was no realistic chance the other robot
+was anywhere near also deciding to dial. Jitter's entire purpose is
+reducing the odds of a genuine simultaneous-dial race; applying it when
+that race can't actually happen just adds a pointless ~0-1s delay for no
+safety benefit.
+
+**Is this new information, or a violation of "agents must have different
+information"?** No - the shared map (both boundaries) is already public
+via `get_map()`, and a robot that senses the other's real position could
+derive this itself by arithmetic (own position + gap + which side the
+other robot is on). `other_distance_to_boundary` just does that
+arithmetic once, robustly, in `world_server.py` (the one place that
+actually holds both real positions) rather than have every caller
+re-derive it. Nothing private (situation, urgency, policy) crosses this
+line - it's the same category of already-derived-from-sensing fact
+`gap_if_sensed`/`other_cleared_zone` already were.
+
+**Explicitly not safety-critical:** this is a heuristic that only affects
+*whether a robot waits before dialing*, never whether a race is resolved
+correctly once one happens. If `RACE_PLAUSIBLE_DISTANCE` is ever wrong in
+either direction - too small (skips jitter when a race was actually
+possible) or too large (jitters when it didn't need to) - D18's static
+tiebreak and `incoming_active` guard still fully handle the actual
+correctness guarantee regardless. This can be tuned freely without
+touching safety.
+
+**Verified live:** the same scenario that motivated D21/D22 now dials
+immediately (`comms_step: 2`, down from `10`) with the console explicitly
+printing why ("sensing Robot B but it's far from its own boundary -
+dialing immediately, no jitter"), while the underlying jitter/race
+mechanism itself is unchanged for the case it actually protects.
+
+**Would change our mind:** `RACE_PLAUSIBLE_DISTANCE = 5` is a rough
+guess from observed step timing (~0.2-0.25s/step, jitter up to 1s), not
+measured against real race frequency at different thresholds - worth
+revisiting with real data if races start feeling too frequent or too
+rare relative to what the grid's geometry would suggest.
+
+---
+
+## D24 — A networked LLM negotiated completely blind to position, since Phase 5
+
+**Decided:** `observation.py` gained `compose_observation_from_dict()` -
+the same Job 4 composition `compose_observation()` always did (D4b),
+built from `world_server.py`'s `get_observation()` dict instead of raw
+positions, and extended with `other_distance_to_boundary` (D23) so a
+robot can tell a real conflict apart from something merely sensed from
+far off. `agent.py`'s `run_robot()` now keeps `me.situation` live -
+recomposed from the current MCP observation every loop iteration, using
+the *original* private text captured once before the loop (so it never
+compounds) - so whichever role ends up calling the policy (this robot's
+own dial, or `NegotiationExecutor` reacting to an incoming task, both
+read the same shared `Robot` object) sees real position and sensing
+facts, not just the static hand-authored situation.
+
+**What was actually true before this, stated plainly:** `compose_observation()`
+was never called anywhere in `agent.py`/`agent_executor.py` - grepping
+both files for it returned nothing. Every networked negotiation since
+Phase 5, including every LLM-vs-LLM run shown earlier in this project,
+happened with the model working from *only* the static private text
+("empty pallet return, no deadline") - zero awareness of its own
+position, whether it was at a boundary, whether it sensed the other
+robot, or how far away that robot actually was. Phase 3's `world.py`
+composed this correctly every time (`_negotiate_priority()`); the step
+never got carried over when negotiation moved off the in-process world.
+
+**Why this stayed hidden so long:** the deterministic policies
+(`Stubborn`, `AlwaysYield`, etc.) never read `situation` at all, so
+nothing about their behavior would ever expose the gap - only an LLM
+policy, actually reasoning from the text it's given, could reveal it,
+and only by a human reading its stated reasoning and noticing something
+was missing. Caught directly: the user watched Robot A immediately offer
+to yield in a case where B was still 20+ steps away, asked why A
+"missed" that B was far off, and the honest answer turned out to be that
+A was never told at all - not a reasoning failure, an information
+failure.
+
+**Verified live:** the same `routine_vs_medical` case that exposed the
+gap now has Robot A open with *"I'm at corridor entrance, 1 cell away.
+You're 17 cells from your boundary. I go first, minimal wait for you"* -
+a real, grounded, spatially-aware proposal that didn't exist before this
+fix. B still wins (correctly, matching ground truth) on the strength of
+its actual medical urgency, but now the negotiation is a real exchange
+of claims instead of one side reflexively yielding with no facts to
+reason from.
+
+**A related quality note, not itself fixed here:** the LLM's stated
+numbers in its replies don't always exactly match the injected facts
+(one run had B claim "you're 7" when the real gap was different) - the
+model appears to paraphrase/estimate rather than quote precisely. Worth
+watching if this project ever needs to score claims against ground
+truth automatically (D10's `correct` scoring doesn't currently do this),
+but the negotiation *decisions* observed so far have stayed correct
+despite the imprecise phrasing.
+
+**Would change our mind:** if a future policy needs the *exact* Job 4
+text shape Phase 3 uses (not the dict-derived version) - unlikely, since
+`world_server.py` doesn't hold raw positions in a form `compose_observation()`
+could consume directly without the same fragile arithmetic this design
+deliberately avoided (see D23's identical reasoning for
+`other_distance_to_boundary` itself).
+
+## D25 — The network visualizer collapses idle polling rows
+
+**Decided:** `visualize_network.py` gained `collapse_idle_runs()`,
+applied to the raw world log before it becomes the replay's `log` list.
+Consecutive rows where neither robot moved and priority didn't change get
+merged into one displayed row, summing their `elapsed_ms` and carrying an
+`idle_polls_collapsed` count so the merge is visible, not hidden -
+`visualize_template.html` appends "(N idle polls collapsed)" to that
+row's label. `negotiation.step`/`comms_step` (computed against the raw,
+uncollapsed rows via `find_step_at_or_after`, D22) get remapped through
+the same collapse to still point at the right row.
+
+**Why:** every `propose_action` call logs a row, including no-op "wait"
+polls, and each robot polls on its own ~0.2s loop independent of the
+other. `LLMPolicy.respond()` is a synchronous call inside an `async def`
+(a pre-existing limitation, D15) - it blocks that robot's entire process
+for the duration of an API call. So while one robot is mid-negotiation
+(several sequential LLM turns, several real seconds), the other keeps
+polling and logging identical rows the whole time. Caught live: the user
+watched a replay where the negotiation dialogue appeared at step 49/50
+of a 79-row log, asked if something was "messed up." It wasn't a
+correctness bug - D22's timestamp correlation was landing on the right
+row - but 29 duplicate "wait/wait" frames between "establishing comms"
+and the actual dialogue made the replay look broken.
+
+**Verified live:** re-ran the same scenario after the fix - a ~6-second,
+3-turn negotiation that previously spanned 29 empty frames now shows as
+one frame ("step 20 - 29 idle polls collapsed, ~6.0s") immediately
+followed by the negotiation dialogue. Confirmed this wasn't one unlucky
+run: a second re-run had a similar-magnitude real negotiation delay,
+consistent with the synchronous-LLM-call explanation, not a fluke.
+
+**Would change our mind:** if `LLMPolicy` ever becomes genuinely async
+(the D15 limitation gets fixed) - the idle stretches would mostly
+disappear on their own, and this collapsing would just rarely trigger,
+not need reverting.
+
+## D26 — Sensor range is physically motivated, not tuned to grid extremes; the asymmetric grid experiment is over
+
+**Decided:** `SENSOR_RANGE` is now `len(CORRIDOR_ZONE) + 3` (currently
+6, unchanged in value from before D21, but now a formula instead of a
+constant tuned to the grid's endpoints) instead of D21's `22`, which was
+specifically computed to preserve "always sensed by the boundary" on the
+widened, asymmetric grid. `MIN_POSITION`/`MAX_POSITION` are back to `1`/`8`
+(from `1`/`24`), and `--max-ticks` defaults are back to `30` (from `90`)
+in `simulate.py`/`visualize.py`/`world.py`'s `run_episode` - D21's
+asymmetric-grid experiment is over.
+
+**Why:** requested directly - a sensor range computed to guarantee
+detection from clear across an arbitrarily long map was never meant to
+be permanent; it was D21's way of forcing an asymmetric-arrival case to
+finally happen live. In reality, a sensor detects an approaching robot
+once it's close enough to the shared zone to matter - corridor length
+plus a small margin - not from anywhere on the grid. That naturally means
+a robot only negotiates when there's a real collision risk; one that
+reaches its own boundary with nothing nearby just proceeds, free, same
+as Phase 3 always allowed for. Decoupling the formula from grid extremes
+also means a future grid-size change won't need `SENSOR_RANGE`
+recomputed by hand the way D21 did - it was the same underlying coupling
+that made D21's own math (`|A_BOUNDARY - B_START|`) necessary in the
+first place.
+
+**Verified:** `world_eval.py`'s completion rate (45/50), negotiation rate
+(45/50), correctness (13/27), and `avg_ticks_used` (10.2) are all
+byte-for-byte identical to the original pre-D21 baseline cited in D21's
+own decision text - confirming the revert is exact, not approximate.
+Live network run on the narrow sensor range against the *still-widened*
+grid (before reverting grid size) showed Robot A claiming priority alone
+and finishing before B ever came into range - correct behavior, no real
+collision risk existed in that case. A second live run, after reverting
+to the size-8 grid, showed `Robot A: at boundary, sensing Robot B -
+dialing` - a real negotiation, naturally, on the original grid size,
+without needing D21's artificial widening to produce it.
+
+**Would change our mind:** if a future experiment wants to force a
+genuinely wide sensor range again on purpose (D21's original goal, now
+achievable without touching grid size at all) - a one-line
+`SENSOR_RANGE` override, not a reason to revert this decision.
+
+## D27 — The race tiebreak *winner* must also cancel its own dial once it learns the outcome another way
+
+**Decided:** `agent.py`'s `on_resolved` callback now cancels this robot's
+own in-flight outbound `dial_holder["task"]`, if any, the moment a
+negotiation concludes via an *incoming* task. Previously only
+`on_task_started`'s tiebreak logic ever cancelled an outbound dial, and
+only for the *losing* side (D18's `is_my_turn_to_initiate` check). The
+winning side had no reason built in to ever cancel its own dial, because
+D18 was verified against the widened, asymmetric grid (D21), where a
+genuine two-sided race was structurally rare - A almost always finished
+long before B ever got close enough to also be dialing.
+
+**Why:** surfaced immediately on reverting to the symmetric grid (D26) -
+both robots now regularly reach their boundaries close enough in real
+time to both dial at once. When the loser's own outbound call reaches
+the winner's server *before* the loser manages to cancel it, the winner
+receives a real incoming task and resolves it as a responder, while its
+own outbound dial (never cancelled - it's the tiebreak winner) keeps
+running as a second, fully independent negotiation for the very same
+standoff. Live evidence: `routine_vs_medical`, LLM-vs-LLM, size-8 grid -
+Robot A's responder side accepted an incoming proposal from B and wrote
+the trace, then its still-running outbound dial made an entirely
+separate proposal to B moments later, which timed out against a peer
+that had already moved on, throwing an unhandled `ClientDisconnect` in
+the A2A server routing layer. Not a data-correctness bug (the first,
+real negotiation's outcome was already correct and already committed) -
+a crash risk and duplicate LLM spend on top of it.
+
+**Why `on_resolved`, not `on_task_started`:** the tiebreak in
+`on_task_started` still has a real job - deciding which side's dial
+*proceeds* when both are racing to start. But by the time `on_resolved`
+fires, the standoff is over, full stop, regardless of which side's
+attempt actually produced the answer. Cancelling there doesn't touch the
+tiebreak logic at all; it just recognizes that once the real-world
+conflict is resolved, any other still-running attempt to resolve the
+same conflict is now provably redundant.
+
+**Verified live:** 3 runs with deterministic (`stubborn`) policies (fast
+enough that a full two-sided race rarely stays open long) - no crashes,
+matching `simulate.py`'s baseline outcomes. 3 runs with `llm`-vs-`llm`
+(slow enough that the race window regularly stays open) - all 3
+completed cleanly; 2 of them printed the new cancellation line and
+showed the fix actually engaging, with the winning side's redundant dial
+cleanly cancelled instead of erroring out.
+
+**Would change our mind:** if a future design lets two robots
+legitimately hold two *independent* negotiations at once (not the case
+here - there are only ever two robots and one shared corridor, so any
+resolved standoff is necessarily the same standoff any other in-flight
+attempt was also trying to resolve).

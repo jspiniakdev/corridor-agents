@@ -16,12 +16,21 @@ visualize.py produced - the template needs zero changes.
 
 world_server.py's log has no concept of "priority" at all (D17) - that
 decision lives entirely in agent.py/A2A now, never touching the world.
-Priority is reconstructed here, after the fact, by the simplest signal
-the log actually contains: a robot "has priority" from the first entry
-where it successfully moves off its own boundary position - whether that
-was negotiated or claimed for free, that's the moment "who goes first"
-became real. Good enough for a debugging visualization, not a claim of
-being the same kind of ground truth Phase 3's live state.priority was.
+When a negotiation happened, the winner comes straight from
+negotiation.check_agreement() (authoritative - it's the same function
+that decided it live) and *when* it happened comes from real timestamps
+(D22): agent.py now records comms_established_at (when the negotiating
+task actually opened) and resolved_at (when it concluded) in the trace
+file, correlated here against world_server.py's own per-entry timestamps
+(D20) to find the matching world-log step. This replaces an earlier,
+broken heuristic ("priority becomes known when the winner first moves
+off its own boundary") that looked right on a symmetric grid but badly
+misattributed the negotiation's timing once the grid became asymmetric
+(D21) - a robot can win a negotiation and then still be many, unrelated
+steps away from ever reaching its own boundary. The boundary-crossing
+signal is kept only as a fallback, for episodes that never negotiate at
+all (a robot arrived alone) - there both a real winner and a real "when"
+have to be inferred from the log, since there's no trace file to read.
 """
 
 import argparse
@@ -32,7 +41,8 @@ import sys
 
 sys.path.insert(0, "src")
 
-from scenarios import BY_ID, SCENARIOS  # noqa: E402
+from negotiation import check_agreement  # noqa: E402
+from scenarios import BY_ID  # noqa: E402
 from wire import history_from_list  # noqa: E402
 
 from agent import NEGOTIATION_TRACE_PATH  # noqa: E402
@@ -49,11 +59,32 @@ async def mcp_call(client, name, **args):
 
 def load_negotiation_trace():
     """None if the episode never negotiated - a robot arrived at its
-    boundary alone, so no trace file was ever written."""
+    boundary alone, so no trace file was ever written. Otherwise
+    {"messages": [Message, ...], "comms_established_at": float,
+    "resolved_at": float} - see D22."""
     if not os.path.exists(NEGOTIATION_TRACE_PATH):
         return None
     with open(NEGOTIATION_TRACE_PATH) as f:
-        return history_from_list(json.load(f))
+        data = json.load(f)
+    return {
+        "messages": history_from_list(data["messages"]),
+        "comms_established_at": data["comms_established_at"],
+        "resolved_at": data["resolved_at"],
+    }
+
+
+def find_step_at_or_after(entries, target_timestamp):
+    """The first world-log entry whose real timestamp is >= target_timestamp
+    - i.e., the world-log step that was happening around the time this
+    real negotiation-channel event occurred (D22). Falls back to the last
+    entry if the target is after everything the world ever logged (e.g.
+    the negotiation resolved right as the episode was ending)."""
+    if not entries:
+        return None
+    for i, entry in enumerate(entries):
+        if entry["timestamp"] >= target_timestamp:
+            return i
+    return len(entries) - 1
 
 
 def compute_priority_per_row(entries, a_start, a_boundary, b_start, b_boundary):
@@ -75,6 +106,67 @@ def compute_priority_per_row(entries, a_start, a_boundary, b_start, b_boundary):
     return per_row, decided_at
 
 
+def collapse_idle_runs(raw_log):
+    """Consecutive rows where neither robot moved and priority didn't
+    change get merged into one displayed row, summing elapsed_ms.
+
+    Every propose_action call logs a row, including no-op "wait" polls
+    (world_server.py's get_log() docstring), and each robot polls on its
+    own ~0.2s loop regardless of what the other is doing. LLMPolicy.respond()
+    is a synchronous call inside an async def (a pre-existing limitation,
+    D15) - it blocks that robot's *entire* process for the duration of an
+    API call, so while one robot is mid-negotiation the other keeps
+    polling and logging identical "wait" rows the whole time. A real
+    8-second, 3-turn negotiation can end up looking like it took 40+
+    steps, with dozens of frames of nothing happening in between - not
+    wrong (D20's real elapsed-time replay is accurate), just noisy to
+    watch. Collapsing these into one frame per idle stretch (labeled with
+    how many polls it absorbed, so nothing is silently hidden) keeps the
+    replay honest without forcing a viewer through every poll.
+
+    Returns (collapsed_rows, old_step_to_new_step) - the mapping lets
+    negotiation.step/comms_step (computed against the raw, uncollapsed
+    rows via find_step_at_or_after) point at the right collapsed row."""
+    collapsed = []
+    old_to_new = {}
+    i = 0
+    n = len(raw_log)
+    while i < n:
+        row = raw_log[i]
+        is_idle = row["a_action"] == "wait" and row["b_action"] == "wait"
+        run_end = i + 1
+        if is_idle:
+            while run_end < n:
+                other = raw_log[run_end]
+                if (
+                    other["a_action"] == "wait"
+                    and other["b_action"] == "wait"
+                    and other["a_position"] == row["a_position"]
+                    and other["b_position"] == row["b_position"]
+                    and other["priority"] == row["priority"]
+                ):
+                    run_end += 1
+                else:
+                    break
+        new_step = len(collapsed)
+        for old_index in range(i, run_end):
+            old_to_new[old_index] = new_step
+        collapsed.append(
+            {
+                "step": new_step,
+                "a_position": row["a_position"],
+                "b_position": row["b_position"],
+                "a_action": row["a_action"],
+                "b_action": row["b_action"],
+                "priority": row["priority"],
+                "elapsed_ms": sum(raw_log[k]["elapsed_ms"] for k in range(i, run_end)),
+                "idle_polls_collapsed": run_end - i,
+            }
+        )
+        i = run_end
+    return collapsed, old_to_new
+
+
 def build_episode_data(scenario, policy_a_name, policy_b_name, grid, entries, messages):
     """Same shape build_episode_data() produced in Phase 3, with one
     honest change (D20): "tick" is gone. There's no shared clock anymore
@@ -87,14 +179,42 @@ def build_episode_data(scenario, policy_a_name, policy_b_name, grid, entries, me
     really were - two robots moving milliseconds apart, or a multi-second
     negotiation gap, now look different in the replay instead of both
     just being "the next tick."."""
-    priority_per_row, decided_at = compute_priority_per_row(entries, 1, grid["a_boundary"], 8, grid["b_boundary"])
+    if messages is None:
+        # never negotiated - a robot arrived at its boundary alone, so the
+        # only signal available at all is the log itself
+        priority_per_row, decided_at = compute_priority_per_row(
+            entries, grid["min_position"], grid["a_boundary"], grid["max_position"], grid["b_boundary"]
+        )
+        negotiation = None
+    else:
+        # a real negotiation happened - the winner and its real timing
+        # both come from the trace file (D22), not inferred from movement
+        agreed_on = check_agreement(messages["messages"])
+        resolved_at = messages["resolved_at"]
+        comms_at = messages["comms_established_at"]
+        decided_at = find_step_at_or_after(entries, resolved_at)
+        comms_step = find_step_at_or_after(entries, comms_at)
+        priority_per_row = [None] * len(entries)
+        if decided_at is not None:
+            for i in range(decided_at, len(entries)):
+                priority_per_row[i] = agreed_on
+        negotiation = {
+            "step": decided_at,
+            "comms_step": comms_step,
+            "agreed": agreed_on is not None,
+            "agreed_on": agreed_on,
+            "messages": [
+                {"speaker": m.speaker, "intent": m.intent.value, "goes_first": m.goes_first, "text": m.text}
+                for m in messages["messages"]
+            ],
+        }
 
-    log = []
+    raw_log = []
     for i, entry in enumerate(entries):
         a_action = entry["resolved"] if entry["side"] == "a" else "wait"
         b_action = entry["resolved"] if entry["side"] == "b" else "wait"
         elapsed_ms = 0 if i == 0 else round((entry["timestamp"] - entries[i - 1]["timestamp"]) * 1000)
-        log.append(
+        raw_log.append(
             {
                 "step": i,
                 "a_position": entry["a_position"],
@@ -106,18 +226,10 @@ def build_episode_data(scenario, policy_a_name, policy_b_name, grid, entries, me
             }
         )
 
-    negotiation = None
-    if messages is not None and decided_at is not None:
-        agreed_on = priority_per_row[decided_at]
-        negotiation = {
-            "step": decided_at,
-            "agreed": agreed_on is not None,
-            "agreed_on": agreed_on,
-            "messages": [
-                {"speaker": m.speaker, "intent": m.intent.value, "goes_first": m.goes_first, "text": m.text}
-                for m in messages
-            ],
-        }
+    log, old_to_new_step = collapse_idle_runs(raw_log)
+    if negotiation is not None:
+        negotiation["step"] = None if negotiation["step"] is None else old_to_new_step[negotiation["step"]]
+        negotiation["comms_step"] = None if negotiation["comms_step"] is None else old_to_new_step[negotiation["comms_step"]]
 
     final_priority = priority_per_row[-1] if priority_per_row else None
     should_go_first = scenario.should_go_first
@@ -139,7 +251,7 @@ def build_episode_data(scenario, policy_a_name, policy_b_name, grid, entries, me
                 "policy": policy_a_name,
                 "situation": scenario.a_situation,
                 "urgency": scenario.a_urgency,
-                "start_position": 1,
+                "start_position": grid["min_position"],
                 "target": grid["a_target"],
                 "direction": 1,
             },
@@ -148,7 +260,7 @@ def build_episode_data(scenario, policy_a_name, policy_b_name, grid, entries, me
                 "policy": policy_b_name,
                 "situation": scenario.b_situation,
                 "urgency": scenario.b_urgency,
-                "start_position": 8,
+                "start_position": grid["max_position"],
                 "target": grid["b_target"],
                 "direction": -1,
             },
@@ -193,9 +305,9 @@ async def main_async(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--scenario", default=SCENARIOS[0].id, choices=list(BY_ID))
-    parser.add_argument("--a", default="stubborn", help="Robot A's policy, for display only")
-    parser.add_argument("--b", default="stubborn", help="Robot B's policy, for display only")
+    parser.add_argument("--scenario", default="routine_vs_medical", choices=list(BY_ID))
+    parser.add_argument("--a", default="llm", help="Robot A's policy, for display only")
+    parser.add_argument("--b", default="llm", help="Robot B's policy, for display only")
     parser.add_argument("--world-url", default="http://127.0.0.1:9500/mcp")
     args = parser.parse_args()
     asyncio.run(main_async(args))

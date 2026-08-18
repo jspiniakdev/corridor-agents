@@ -317,8 +317,32 @@ function buildFrames() {
 
   EPISODE_DATA.log.forEach(function (entry) {
     const step = entryStep(entry);
-    const isNegotiationTick =
-      EPISODE_DATA.negotiation !== null && entryStep(EPISODE_DATA.negotiation) === step;
+    const negotiation = EPISODE_DATA.negotiation;
+    const isNegotiationTick = negotiation !== null && entryStep(negotiation) === step;
+
+    // D22: a separate, earlier marker for when the task actually opened -
+    // real time.time() timestamps correlated against the world log, not
+    // guessed from movement. Skipped if it landed on the same step as the
+    // resolution itself (a fast negotiation, nothing to show in between).
+    const isCommsStep =
+      negotiation !== null && negotiation.comms_step === step && negotiation.comms_step !== negotiation.step;
+    if (isCommsStep) {
+      const caller = negotiation.messages.length > 0 ? negotiation.messages[0].speaker : "a robot";
+      const callee = caller === "Robot A" ? "Robot B" : "Robot A";
+      built.push({
+        tickLabel: STEP_WORD + " " + step + " - establishing comms",
+        aPosition: aPosition,
+        bPosition: bPosition,
+        aAction: "",
+        bAction: "",
+        dialogueVisible: true,
+        chatMessages: [],
+        priorityText: caller + " calling " + callee + "...",
+        currentPriority: currentPriority,
+        verdictVisible: false,
+        delayMs: DECISION_DELAY_MS,
+      });
+    }
 
     if (isNegotiationTick) {
       const messages = EPISODE_DATA.negotiation.messages;
@@ -342,7 +366,6 @@ function buildFrames() {
       }
 
       // one frame showing the decided priority, before anyone moves
-      const negotiation = EPISODE_DATA.negotiation;
       const decisionText = negotiation.agreed
         ? "Priority: " + negotiation.agreed_on
         : "DEADLOCK - no agreement";
@@ -366,8 +389,17 @@ function buildFrames() {
     bPosition = entry.b_position;
     currentPriority = entry.priority;
 
+    // D22 follow-up: idle "wait/wait" polling rows get merged in the data
+    // builder (visualize_network.py's collapse_idle_runs) so a slow LLM
+    // negotiation doesn't force a viewer through dozens of identical
+    // frames - labeled here, not silently hidden.
+    const idleSuffix =
+      entry.idle_polls_collapsed && entry.idle_polls_collapsed > 1
+        ? " (" + entry.idle_polls_collapsed + " idle polls collapsed)"
+        : "";
+
     built.push({
-      tickLabel: STEP_WORD + " " + step,
+      tickLabel: STEP_WORD + " " + step + idleSuffix,
       aPosition: aPosition,
       bPosition: bPosition,
       aAction: entry.a_action,

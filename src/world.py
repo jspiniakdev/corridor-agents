@@ -1,13 +1,23 @@
 """Phase 3: the corridor becomes a real 1D grid, and the negotiated decision
 causes real movement. See docs/PLAN.md §5 (Phase 3) and §4 (the layer split).
 
-Positions run 1 to 8. CORRIDOR_ZONE is a one-robot-wide hallway: being
-anywhere in it at the same time as the other robot is a collision, not just
-sharing the exact same cell.
+Positions run MIN_POSITION to MAX_POSITION. CORRIDOR_ZONE is a
+one-robot-wide hallway near A's end: being anywhere in it at the same time
+as the other robot is a collision, not just sharing the exact same cell.
 
-Robot A starts at 1 and moves toward 8. Robot B starts at 8 and moves toward
-1. Each has a boundary position - the last safe cell before the zone - where
-it must stop and wait if it doesn't yet have permission to enter.
+Robot A starts at MIN_POSITION and moves toward MAX_POSITION. Robot B
+starts at MAX_POSITION and moves toward MIN_POSITION. Each has a boundary
+position - the last safe cell before the zone - where it must stop and
+wait if it doesn't yet have permission to enter.
+
+The grid was briefly widened and made asymmetric (D21) to force a real,
+live-observable case Phase 3's original symmetric grid could never
+naturally produce - A reaching its boundary long before B was anywhere
+close. That experiment is done; the grid is back to its original
+symmetric size (D25), now paired with a physically-motivated SENSOR_RANGE
+that doesn't need the asymmetric grid to make the same point: a robot
+only senses the other - and only negotiates - when there's a real
+collision risk, not from anywhere on the map.
 """
 
 from __future__ import annotations
@@ -17,23 +27,31 @@ from dataclasses import dataclass, field
 from negotiation import POLICIES, Robot, negotiate
 from observation import compose_observation
 
+MIN_POSITION = 1
+MAX_POSITION = 8
+
 CORRIDOR_ZONE = {3, 4, 5}
 
-A_START = 1
-A_TARGET = 8
+A_START = MIN_POSITION
+A_TARGET = MAX_POSITION
 A_BOUNDARY = 2
 A_DIRECTION = 1
 
-B_START = 8
-B_TARGET = 1
+B_START = MAX_POSITION
+B_TARGET = MIN_POSITION
 B_BOUNDARY = 6
 B_DIRECTION = -1
 
-# Not detected at the start (gap 7), but always detected by the time a robot
-# reaches its own boundary, even in the worst case where the other robot
-# hasn't moved yet (gap 6 after one move). 6 is the only integer for which
-# both of those hold.
-SENSOR_RANGE = 6
+# Physically motivated, not tuned to grid size (D25, reversing D21's
+# "always sensed by the boundary" derivation): a real sensor detects an
+# approaching robot once it's close enough to the shared zone to matter,
+# not from anywhere on the map. corridor length + a small margin is
+# enough to see the other robot coming before either commits, so
+# negotiation only fires when there's a real collision risk - a robot
+# that reaches its own boundary with nothing nearby just proceeds, free,
+# same as Phase 3. Decoupled from MIN_POSITION/MAX_POSITION entirely, so
+# it no longer needs recomputing if the grid's size changes.
+SENSOR_RANGE = len(CORRIDOR_ZONE) + 3
 
 
 @dataclass

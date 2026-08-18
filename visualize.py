@@ -31,6 +31,8 @@ from world import (  # noqa: E402
     B_START,
     B_TARGET,
     CORRIDOR_ZONE,
+    MAX_POSITION,
+    MIN_POSITION,
     run_episode,
 )
 
@@ -87,8 +89,8 @@ def build_episode_data(scenario, policy_a_name, policy_b_name, result):
     return {
         "scenario_id": scenario.id,
         "grid": {
-            "min_position": 1,
-            "max_position": 8,
+            "min_position": MIN_POSITION,
+            "max_position": MAX_POSITION,
             "corridor_zone": sorted(CORRIDOR_ZONE),
             "a_boundary": A_BOUNDARY,
             "b_boundary": B_BOUNDARY,

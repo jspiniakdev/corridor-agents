@@ -9,6 +9,8 @@ import sys
 sys.path.insert(0, ".")
 sys.path.insert(0, "src")
 
+from world import B_START  # noqa: E402
+
 import world_server as ws  # noqa: E402
 
 
@@ -29,7 +31,8 @@ def test_get_observation_reflects_current_position():
     obs = ws.get_observation("a")
     assert obs["position"] == 1
     assert obs["at_boundary"] is False
-    assert obs["sensed_other"] is False  # A=1, B=8, gap=7 > SENSOR_RANGE=6
+    assert obs["sensed_other"] is False  # A=1, B=8, gap=7 > SENSOR_RANGE=6 (D25)
+    assert obs["other_distance_to_boundary"] is None  # not sensed, so not knowable
 
 
 def test_get_observation_senses_other_within_range():
@@ -39,6 +42,15 @@ def test_get_observation_senses_other_within_range():
     obs = ws.get_observation("a")
     assert obs["sensed_other"] is True
     assert obs["gap_if_sensed"] == 2
+
+
+def test_get_observation_reports_other_distance_to_its_own_boundary():
+    reset_state()
+    ws.STATE.a.position = 1
+    ws.STATE.b.position = 5  # sensed (gap=4 <= 6), 1 step from its own boundary (6)
+    obs = ws.get_observation("a")
+    assert obs["sensed_other"] is True
+    assert obs["other_distance_to_boundary"] == 1
 
 
 def test_propose_action_rejects_invalid_action():
@@ -78,7 +90,7 @@ def test_propose_action_blocks_entry_while_the_other_robot_is_in_the_zone():
 def test_propose_action_only_moves_the_requesting_side():
     reset_state()
     ws.propose_action("a", "move")
-    assert ws.STATE.b.position == 8  # untouched by A's call
+    assert ws.STATE.b.position == B_START  # untouched by A's call
 
 
 def test_get_log_starts_empty():
@@ -96,8 +108,8 @@ def test_get_log_records_each_committed_action_in_order():
     assert len(entries) == 2
     for entry in entries:
         assert isinstance(entry.pop("timestamp"), float)  # real wall clock (D20) - checked separately, not for equality
-    assert entries[0] == {"side": "a", "action": "move", "resolved": "move", "a_position": 2, "b_position": 8}
-    assert entries[1] == {"side": "b", "action": "wait", "resolved": "wait", "a_position": 2, "b_position": 8}
+    assert entries[0] == {"side": "a", "action": "move", "resolved": "move", "a_position": 2, "b_position": B_START}
+    assert entries[1] == {"side": "b", "action": "wait", "resolved": "wait", "a_position": 2, "b_position": B_START}
 
 
 def test_get_log_timestamps_are_monotonically_non_decreasing():

@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, "src")
 
 from negotiation import Robot  # noqa: E402
-from observation import compose_observation, distance_to_entrance  # noqa: E402
+from observation import compose_observation, compose_observation_from_dict, distance_to_entrance  # noqa: E402
 from scenarios import SCENARIOS  # noqa: E402
 from world import (  # noqa: E402
     A_BOUNDARY,
@@ -96,3 +96,43 @@ def test_negotiation_actually_receives_the_computed_observation_not_raw_scenario
 
     assert "cell(s) from the corridor entrance" in a_policy.seen_situation
     assert a_policy.seen_situation != S.a_situation
+
+
+# --- compose_observation_from_dict (D24, the networked equivalent) ---------
+
+
+def test_from_dict_includes_sensor_fact_when_sensed():
+    obs = {
+        "distance_to_entrance": 1,
+        "sensed_other": True,
+        "gap_if_sensed": 6,
+        "other_distance_to_boundary": 4,
+    }
+    text = compose_observation_from_dict(obs, "Robot B", "private")
+    assert "Robot B" in text
+    assert "6 cell(s) away" in text
+    assert "4 cell(s) from its own boundary" in text
+    assert text.endswith("private")
+
+
+def test_from_dict_omits_sensor_facts_when_not_sensed():
+    obs = {"distance_to_entrance": 1, "sensed_other": False, "gap_if_sensed": None, "other_distance_to_boundary": None}
+    text = compose_observation_from_dict(obs, "Robot B", "private")
+    assert "Robot B" not in text
+    assert "own boundary" not in text
+
+
+def test_from_dict_omits_other_boundary_fact_when_sensed_but_unknown():
+    # sensed_other True with other_distance_to_boundary missing shouldn't
+    # happen in practice (world_server.py always fills it in when sensed),
+    # but the function should degrade gracefully rather than crash.
+    obs = {"distance_to_entrance": 1, "sensed_other": True, "gap_if_sensed": 6}
+    text = compose_observation_from_dict(obs, "Robot B", "private")
+    assert "6 cell(s) away" in text
+    assert "own boundary" not in text
+
+
+def test_from_dict_never_leaks_urgency():
+    import inspect
+
+    assert "urgency" not in inspect.signature(compose_observation_from_dict).parameters

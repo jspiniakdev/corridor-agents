@@ -48,6 +48,8 @@ from world import (  # noqa: E402
     B_START,
     B_TARGET,
     CORRIDOR_ZONE,
+    MAX_POSITION,
+    MIN_POSITION,
     SENSOR_RANGE,
     RobotState,
     WorldState,
@@ -84,8 +86,8 @@ def _other_state(side: str) -> RobotState:
 def get_map() -> dict:
     """Static grid facts. Called once, at startup."""
     return {
-        "min_position": 1,
-        "max_position": 8,
+        "min_position": MIN_POSITION,
+        "max_position": MAX_POSITION,
         "corridor_zone": sorted(CORRIDOR_ZONE),
         "a_boundary": A_BOUNDARY,
         "b_boundary": B_BOUNDARY,
@@ -97,7 +99,15 @@ def get_map() -> dict:
 @mcp.tool()
 def get_observation(side: str) -> dict:
     """Job 4 from D4b, position/sensor half only - the private situation
-    text half stays local to agent.py (D16's for_side())."""
+    text half stays local to agent.py (D16's for_side()).
+
+    other_distance_to_boundary (D23) is not new information in kind - the
+    map (including both boundaries) is already public via get_map(), and
+    a robot that senses the other's position could derive this itself by
+    arithmetic; this just does that arithmetic once, robustly, in the one
+    place that actually knows both real positions. It's what lets a robot
+    judge whether the other is anywhere near ALSO being about to
+    negotiate, versus sensed-but-nowhere-close."""
     me = _robot_state(side)
     other = _other_state(side)
     gap = abs(me.position - other.position)
@@ -107,6 +117,7 @@ def get_observation(side: str) -> dict:
         "distance_to_entrance": distance_to_entrance(me.position, me.direction, CORRIDOR_ZONE),
         "sensed_other": sensed,
         "gap_if_sensed": gap if sensed else None,
+        "other_distance_to_boundary": abs(other.position - other.boundary) if sensed else None,
         "at_boundary": me.at_boundary,
         "in_zone": me.in_zone,
         "reached_target": me.reached_target,

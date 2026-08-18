@@ -104,11 +104,12 @@ def test_never_yield_standoff_deadlocks_and_negotiate_is_called_exactly_once():
 def test_no_standoff_means_no_negotiation_at_all():
     """When the other robot is genuinely out of sensor range, the
     deliberative layer must stay completely silent. b_position=100 is
-    outside the real 1-8 grid on purpose - within the real grid, once a
-    robot reaches its boundary the other is always within SENSOR_RANGE (the
-    max possible gap from a boundary position is exactly SENSOR_RANGE), so
-    this exercises the "can't sense" branch directly rather than relying on
-    a scenario that can't actually occur in a real episode."""
+    outside the real grid on purpose (MAX_POSITION, D21) - within the real
+    grid, once A reaches its boundary, B is always within SENSOR_RANGE at
+    worst (the max possible gap from A's boundary is exactly
+    SENSOR_RANGE), so this exercises the "can't sense" branch directly
+    rather than relying on a scenario that can't actually occur in a real
+    episode."""
     state = make_state(a_position=A_BOUNDARY, b_position=100)
     executive_decide(state, deliberate=True, max_negotiation_turns=6)
     assert state.negotiation_outcome is None

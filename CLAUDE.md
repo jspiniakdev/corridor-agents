@@ -51,28 +51,77 @@ world's authority narrows to exactly the one thing no single robot can
 safely decide alone: is it safe to enter the shared corridor zone right
 now. See D17.
 
-**Dynamic initiation (D18):** `--side a`/`--side b` no longer means
+**Dynamic initiation (D18, D27):** `--side a`/`--side b` no longer means
 "client-only" vs "server-only" - every `agent.py --world-url` process
 always runs its own A2A server *and* its own movement loop *and* is
 capable of dialing the peer, the instant its own observation says it's
 at the boundary and can sense the other (D12's physical logic,
 unchanged). The dial is jittered and cancellable; a genuine race (both
 sides dial before either sees the other's incoming call) is resolved by
-a fixed name tiebreak cancelling the loser's outbound attempt. Verified
-live, repeatedly, including a real caught race.
+a fixed name tiebreak cancelling the loser's outbound attempt. The
+tiebreak *winner* also cancels its own outbound dial once `on_resolved`
+tells it the outcome is already known via the loser's incoming call
+(D27) - without this the winner could end up running two concurrent
+negotiations for one standoff, a crash this project never observed until
+D26 reverted to a grid small enough for real two-sided races to actually
+happen. Verified live, repeatedly, including real caught races on both
+sides of the tiebreak.
 
-**The network visualizer (D19, D20):** `visualize_network.py` is a new
-post-hoc tool. Fetches the completed episode's log from `world_server.py`
-(`get_log()`, now with a real timestamp per entry), reads
+**The network visualizer (D19, D20, D22):** `visualize_network.py` is a
+new post-hoc tool. Fetches the completed episode's log from
+`world_server.py` (`get_log()`, real timestamp per entry), reads
 `experiments/results/negotiation_trace.json` if a negotiation happened
-(written by whichever robot's `agent.py` process learns the outcome),
-and reconstructs priority from the log itself, since the world has no
-concept of it at all. `visualize_template.html` is shared with Phase 3's
-`visualize.py`, not left fully untouched as first planned - there's no
-shared clock anymore (D17), so "tick" would have been a lie for network
-episodes; the template now detects which shape it was given and shows
-real elapsed time between steps for network episodes while Phase 3's
-`visualize.py` output renders exactly as it always did.
+(written by whichever robot's `agent.py` process learns the outcome, now
+also carrying real `comms_established_at`/`resolved_at` timestamps), and
+gets the winner from `negotiation.check_agreement()` directly rather than
+inferring it from movement. `visualize_template.html` is shared with
+Phase 3's `visualize.py`, not left fully untouched as first planned -
+there's no shared clock anymore (D17), so "tick" would have been a lie
+for network episodes; the template detects which shape it was given, and
+network episodes now also show a distinct "establishing comms" marker
+before the negotiation dialogue. **(D25)** consecutive idle "wait/wait"
+polling rows are now collapsed into one labeled frame - `LLMPolicy`'s
+synchronous API calls (D15) block the negotiating robot's whole process
+for several real seconds, during which the *other* robot's process keeps
+polling every ~0.2s and logging no-op rows; without collapsing, a replay
+could show dozens of identical empty frames between "establishing comms"
+and the actual dialogue.
+
+**The grid was briefly widened and made asymmetric (D21), then reverted
+(D26).** `MIN_POSITION`/`MAX_POSITION` are back to 1/8, `--max-ticks`
+defaults back to 30 - that experiment is done. What stuck: `SENSOR_RANGE`
+is no longer tuned to grid extremes at all. It's `len(CORRIDOR_ZONE) + 3`
+(still 6, same value as before D21, now a physically-motivated formula
+instead of a constant computed from `|A_BOUNDARY - B_START|`) - a robot
+only senses (and therefore only negotiates with) the other robot once
+it's close enough to the shared zone to be a real collision risk, not
+from anywhere on the map. `world_eval.py`'s stats after reverting are
+byte-identical to the original pre-D21 baseline.
+
+**Timestamp-based negotiation attribution (D22) and distance-aware jitter
+(D23):** the visualizer's original heuristic for "when did negotiation
+happen" (first log entry where the winner moves off its own boundary)
+broke on the asymmetric grid - fixed by having `world_server.py` and
+`agent.py` log real `time.time()` and correlating them directly, instead
+of inferring timing from movement. The same asymmetry exposed a second
+issue: jitter (D18) was firing even when the other robot was 20+ steps
+away and no real race was possible. `get_observation()` now reports
+`other_distance_to_boundary`; `agent.py`'s `should_skip_jitter()` skips
+the jitter delay entirely past `RACE_PLAUSIBLE_DISTANCE` (5) - not
+safety-critical (D18's tiebreak still handles correctness regardless),
+just removes a pointless delay.
+
+**Live observation composition (D24):** a previously-hidden gap - Phase
+3's `compose_observation()` (position/sensor facts, D4b's Job 4) was
+never ported into the networked path at all. Every LLM negotiation since
+Phase 5 ran on static private text alone, with zero awareness of its own
+position or how far the other robot actually was. Caught by watching an
+LLM's own stated reasoning miss something it should have known. Fixed
+with `observation.py`'s `compose_observation_from_dict()` (the dict-based
+equivalent, also carrying D23's `other_distance_to_boundary`), wired into
+`agent.py`'s `run_robot()` so `me.situation` is recomposed from the live
+MCP observation every loop iteration, using the original private text
+captured once so it never compounds.
 
 **Next: Phase 7 — containers** (Docker + Compose). See `PLAN.md` §5.
 
@@ -80,7 +129,7 @@ real elapsed time between steps for network episodes while Phase 3's
 
 ```bash
 source .venv/bin/activate        # Python 3.13; required in each new shell
-python -m pytest tests/ -q       # 85 tests, no API calls, ~0.03s
+python -m pytest tests/ -q       # 98 tests, no API calls, ~0.03s
 python run.py                    # one negotiation, deterministic policies
 python run.py --a llm --b llm    # needs: cp .env.example .env && source .env
 python eval.py                   # measurement sweep, deterministic cases only
@@ -108,6 +157,11 @@ python agent.py --scenario <id> --side a --policy stubborn  --port 9001 --peer-u
 # D19: after the episode above finishes, render it (world_server.py must
 # still be running - it holds the log)
 python visualize_network.py --scenario <id> --a stubborn --b always_yield --world-url http://127.0.0.1:9500/mcp
+
+# agent.py's --scenario/--policy default to routine_vs_medical/llm (the
+# project's go-to demo case) - a bare `python agent.py --side a --port ...`
+# now makes real Anthropic API calls and needs .env sourced; pass
+# --policy stubborn explicitly for a free/deterministic smoke test.
 ```
 
 ## The one design principle
