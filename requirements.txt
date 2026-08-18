@@ -13,3 +13,8 @@ sse-starlette>=3.0  # transitive dependency a2a-sdk's JSON-RPC routes need but d
 
 # Phase 6: the world as a real MCP server (docs/PLAN.md §4.2, D17).
 mcp>=2.0.0
+
+# Phase 8: OIDC ID tokens for agent-to-agent auth on Cloud Run (docs/PLAN.md §5, D33).
+# Already pulled in transitively (a2a-sdk/mcp use it); declared directly since
+# agent.py now imports it itself.
+google-auth>=2.30

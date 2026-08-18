@@ -161,16 +161,45 @@ runs); and a much subtler one - `a2a-sdk`'s `create_client()` builds its
 real connection from the *peer's own self-reported AgentCard URL*, not
 the `peer_url` string passed to it, so `agent.py`'s AgentCard had always
 hardcoded `127.0.0.1` there - harmless on one machine (that genuinely was
-correct), fatal across containers. New `--advertise-host` flag (default
-`127.0.0.1`, set to the Compose service name in `docker-compose.yml`)
-fixes it - kept deliberately separate from `--host`, since `0.0.0.0`
-isn't dialable and `127.0.0.1` isn't reachable cross-container; neither
-value works for both jobs. Verified live end-to-end with real containers
-and real Anthropic API calls - correct outcome, clean exit, volume mount
-confirmed, host-side debug tools confirmed working against the
-still-running `world` container afterward.
+correct), fatal across containers. New `--advertise-url` flag (default
+`http://127.0.0.1:<port>`, set to the Compose service's own URL in
+`docker-compose.yml`) fixes it - kept deliberately separate from
+`--host`, since `0.0.0.0` isn't dialable and `127.0.0.1` isn't reachable
+cross-container; neither value works for both jobs. Verified live
+end-to-end with real containers and real Anthropic API calls - correct
+outcome, clean exit, volume mount confirmed, host-side debug tools
+confirmed working against the still-running `world` container
+afterward.
 
-**Next: Phase 8 — deploy** (Cloud Run, Secret Manager, Vertex AI). See `PLAN.md` §5.
+**Phase 8 in progress: deploy (D33).** `robot-b` runs as a real Cloud Run
+**Service** (`--no-allow-unauthenticated`, its own service account,
+`--advertise-url` set to its actual HTTPS URL). `robot-a` runs as a
+Cloud Run **Job**, not a Service - `--side a` without `--world-url` is a
+genuine one-shot process (dial, negotiate, exit; never binds a port),
+which is exactly what Jobs are for and exactly wrong for what Services
+expect. No world integration yet - this is plain Phase 5-style
+negotiation-only mode, deliberately (the plan keeps the simulator local
+through Phase 10; connecting a deployed agent back to it is a separate,
+not-yet-started piece). `--advertise-url` generalized from D32's
+`--advertise-host` (Cloud Run URLs are HTTPS with no port at all, which
+`http://{host}:{port}` can't represent) and a new `--auth` flag (fetches
+a real OIDC ID token via `get_id_token()`, attached as
+`Authorization: Bearer` through `a2a-sdk`'s `ClientConfig.httpx_client`)
+make it work. `get_id_token()` has two genuinely different, both
+live-verified code paths: real Cloud Run resources use the metadata
+server directly; local testing via impersonated ADC credentials needs
+the explicit `impersonated_credentials.IDTokenCredentials` wrapper
+instead (`fetch_id_token()` alone doesn't understand impersonation and
+crashes). Verified live twice - `robot-a` local (impersonated) → `robot-b`
+on Cloud Run, and `robot-a` as a real Cloud Run Job (metadata-server
+credentials, zero involvement from the laptop) → `robot-b` on Cloud Run
+- both real negotiations, correct outcome, and an unauthenticated `curl`
+to `robot-b` confirmed rejected (`403`) before either worked. Still
+open: Claude on Vertex AI (still the direct Anthropic API today) and
+Secret Manager (still `.env`).
+
+**Next: finish Phase 8** - Vertex AI, Secret Manager - then **Phase 9 —
+three or more robots** (Pub/Sub, Firestore). See `PLAN.md` §5.
 
 ## How to run things
 
@@ -235,6 +264,28 @@ docker compose up --build
 python visualize_network.py --world-url http://127.0.0.1:9500/mcp
 python export_timeline_csv.py --world-url http://127.0.0.1:9500/mcp
 docker compose down               # when actually done
+
+# Phase 8 (D33): real Cloud Run - robot-b as a Service (always listening),
+# robot-a as a Job (one-shot: dial, negotiate, exit). Needs gcloud CLI,
+# a GCP project with billing enabled, and the APIs/service accounts/IAM
+# bindings set up once (see D33 for the full list - several fresh-project
+# IAM grants aren't automatic anymore and have to be added by hand).
+gcloud builds submit --tag us-central1-docker.pkg.dev/<project>/cloud-run-source-deploy/robot-b:latest .
+
+gcloud run deploy robot-b \
+  --image us-central1-docker.pkg.dev/<project>/cloud-run-source-deploy/robot-b:latest \
+  --region us-central1 --port 8080 --command python \
+  --args agent.py,--side,b,--policy,always_yield,--host,0.0.0.0,--port,8080,--advertise-url,<robot-b's-own-url> \
+  --service-account robot-b@<project>.iam.gserviceaccount.com \
+  --no-allow-unauthenticated
+
+gcloud run jobs create robot-a \
+  --image us-central1-docker.pkg.dev/<project>/cloud-run-source-deploy/robot-b:latest \
+  --region us-central1 --command python \
+  --args agent.py,--side,a,--policy,stubborn,--peer-url,<robot-b's-own-url>,--auth \
+  --service-account robot-a@<project>.iam.gserviceaccount.com
+
+gcloud run jobs execute robot-a --region us-central1 --wait   # triggers one real negotiation
 ```
 
 ## The one design principle

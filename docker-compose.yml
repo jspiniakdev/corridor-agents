@@ -36,7 +36,7 @@ services:
     build: .
     command: >
       python agent.py --scenario routine_vs_medical --policy llm
-      --side a --port 9001 --host 0.0.0.0 --advertise-host robot-a
+      --side a --port 9001 --host 0.0.0.0 --advertise-url http://robot-a:9001
       --peer-url http://robot-b:9002
       --world-url http://world:9500/mcp
     environment:
@@ -51,7 +51,7 @@ services:
     build: .
     command: >
       python agent.py --scenario routine_vs_medical --policy llm
-      --side b --port 9002 --host 0.0.0.0 --advertise-host robot-b
+      --side b --port 9002 --host 0.0.0.0 --advertise-url http://robot-b:9002
       --peer-url http://robot-a:9001
       --world-url http://world:9500/mcp
     environment:

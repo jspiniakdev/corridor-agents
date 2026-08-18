@@ -89,7 +89,57 @@ def extract_reply(response):
     return status.state, parts
 
 
-async def run_initiator(me, other, peer_url, max_turns):
+def get_id_token(audience):
+    """D33 (Phase 8): a real Google-signed OIDC ID token, scoped to
+    `audience` (the exact URL of the Cloud Run service being called - the
+    audience has to match precisely, since that's what the receiving
+    service checks). Two genuinely different code paths, not one -
+    confirmed live, not assumed: on Cloud Run itself, the attached
+    service account resolves to compute-engine-style ADC, and the plain
+    fetch_id_token() convenience function mints a token from the
+    metadata server directly (the real production path, once a robot is
+    deployed). Running locally via `gcloud auth application-default
+    login --impersonate-service-account=...` (the only way to test this
+    end-to-end before a robot is itself deployed) resolves to
+    impersonated_credentials.Credentials instead - fetch_id_token()
+    doesn't know what to do with that at all and raises
+    DefaultCredentialsError ("neither metadata server or valid service
+    account credentials are found"), so that case needs the explicit
+    IDTokenCredentials wrapper instead."""
+    import google.auth
+    from google.auth import impersonated_credentials
+    from google.auth.transport.requests import Request
+
+    request = Request()
+    credentials, _ = google.auth.default()
+
+    if isinstance(credentials, impersonated_credentials.Credentials):
+        id_credentials = impersonated_credentials.IDTokenCredentials(credentials, target_audience=audience, include_email=True)
+        id_credentials.refresh(request)
+        return id_credentials.token
+
+    from google.oauth2 import id_token as google_id_token
+
+    return google_id_token.fetch_id_token(request, audience)
+
+
+def build_client_config(peer_url, auth):
+    """None (a2a-sdk's own default) unless --auth is set - a plain local
+    or Compose run has no GCP credentials configured at all and should
+    never try to fetch a token it doesn't need. When set, hands
+    create_client() an httpx.AsyncClient with the OIDC token already
+    attached as a header - every request through it, including the
+    initial AgentCard fetch, carries it automatically (D33)."""
+    if not auth:
+        return None
+    import httpx
+    from a2a.client import ClientConfig
+
+    token = get_id_token(peer_url)
+    return ClientConfig(httpx_client=httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}))
+
+
+async def run_initiator(me, other, peer_url, max_turns, auth=False):
     """The --side a client loop: send a message, read back whatever the
     responder's TaskUpdater published, and keep going until the task
     reaches a terminal state. Holds the connection open the whole time -
@@ -105,7 +155,7 @@ async def run_initiator(me, other, peer_url, max_turns):
     from a2a.helpers import get_data_parts, new_data_message
     from a2a.types.a2a_pb2 import Role, SendMessageRequest, TaskState
 
-    client = await create_client(peer_url)
+    client = await create_client(peer_url, client_config=build_client_config(peer_url, auth))
     history = []
     message_times = []
     task_id = None
@@ -155,7 +205,7 @@ async def run_initiator(me, other, peer_url, max_turns):
             return report_outcome(me, history, max_turns), history, message_times
 
 
-async def run_initiator_webhook(me, other, peer_url, webhook_port, max_turns, host="0.0.0.0"):
+async def run_initiator_webhook(me, other, peer_url, webhook_port, max_turns, host="0.0.0.0", auth=False):
     """Same negotiation as run_initiator, but never holds a connection open
     waiting for the responder. Registers a callback URL and sends with
     return_immediately=True, gets control back immediately, and only
@@ -192,7 +242,7 @@ async def run_initiator_webhook(me, other, peer_url, webhook_port, max_turns, ho
     webhook_url = f"http://127.0.0.1:{webhook_port}/push"
     print(f"{me.name} accepting callbacks on {webhook_url}")
 
-    client = await create_client(peer_url)
+    client = await create_client(peer_url, client_config=build_client_config(peer_url, auth))
     history = []
     message_times = []
     task_id = None
@@ -255,35 +305,44 @@ async def run_initiator_webhook(me, other, peer_url, webhook_port, max_turns, ho
         await server_task
 
 
-def build_responder_app(me, other, port, max_turns, on_resolved=None, on_task_started=None, advertise_host="127.0.0.1"):
+def build_responder_app(me, other, port, max_turns, on_resolved=None, on_task_started=None, advertise_url=None):
     """The A2A server app, always wired for push notifications - dormant
     unless a caller actually registers a callback URL (run_initiator
     never does; run_initiator_webhook does). `on_resolved`/
     `on_task_started` are threaded through to NegotiationExecutor - see
     D17, D18.
 
-    advertise_host (D32) is NOT the bind address (--host, which needs to
-    be 0.0.0.0 in a container so anyone can connect in) - it's the
-    address this robot tells PEERS to use when they dial back, embedded
+    advertise_url (D32, D33) is NOT the bind address (--host, which needs
+    to be 0.0.0.0 in a container so anyone can connect in) - it's the
+    full URL this robot tells PEERS to use when they dial back, embedded
     in the AgentCard's own interface.url. a2a-sdk's create_client()
     doesn't just connect to the peer_url it's given and stop there - it
     fetches the peer's AgentCard from that URL, then builds the actual
     JSON-RPC transport from the CARD's own self-reported url (confirmed
     by reading ClientFactory.create_from_url/create directly, not
-    assumed). Left hardcoded to "127.0.0.1" for a long time since it
-    never mattered locally (that's genuinely how a local peer reaches
-    this process) - surfaced as a real bug the first time this ran
-    across separate containers (D32/Phase 7): robot-a would fetch
-    robot-b's card fine, then try to connect back to "127.0.0.1", which
-    inside robot-a's own container just points at itself, and dial
+    assumed). Left hardcoded to "http://127.0.0.1:{port}" for a long
+    time since it never mattered locally (that's genuinely how a local
+    peer reaches this process) - surfaced as a real bug the first time
+    this ran across separate containers (D32/Phase 7): robot-a would
+    fetch robot-b's card fine, then try to connect back to "127.0.0.1",
+    which inside robot-a's own container just points at itself, and dial
     forever, "all connection attempts failed", burning an LLM call every
-    retry."""
+    retry. A single hostname (D32's original --advertise-host) wasn't
+    enough once Cloud Run entered the picture (D33/Phase 8): its URLs
+    are HTTPS with no port at all (e.g.
+    "https://robot-b-<project-number>.<region>.run.app"), which
+    "http://{host}:{port}" can't represent - so this takes the whole URL
+    now, defaulting to "http://127.0.0.1:{port}" (identical to today's
+    behavior) when not given."""
     import httpx
     from a2a.server.request_handlers import DefaultRequestHandler
     from a2a.server.routes import add_a2a_routes_to_fastapi, create_agent_card_routes, create_jsonrpc_routes
     from a2a.server.tasks import BasePushNotificationSender, InMemoryPushNotificationConfigStore, InMemoryTaskStore
     from a2a.types.a2a_pb2 import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
     from fastapi import FastAPI
+
+    if advertise_url is None:
+        advertise_url = f"http://127.0.0.1:{port}"
 
     skill = AgentSkill(
         id="negotiate",
@@ -297,7 +356,7 @@ def build_responder_app(me, other, port, max_turns, on_resolved=None, on_task_st
         version="0.0.1",
         capabilities=AgentCapabilities(streaming=True, push_notifications=True),
         supported_interfaces=[
-            AgentInterface(protocol_binding="JSONRPC", url=f"http://{advertise_host}:{port}", protocol_version="1.0")
+            AgentInterface(protocol_binding="JSONRPC", url=advertise_url, protocol_version="1.0")
         ],
         skills=[skill],
     )
@@ -321,19 +380,19 @@ def build_responder_app(me, other, port, max_turns, on_resolved=None, on_task_st
     return app
 
 
-def run_responder(me, other, port, max_turns, host="0.0.0.0", advertise_host="127.0.0.1"):
+def run_responder(me, other, port, max_turns, host="0.0.0.0", advertise_url=None):
     """The --side b server on its own: always listening, reacting to
     whatever the initiator sends. See run_responder_async for the
     concurrent-with-a-movement-loop version (--world-url)."""
     import uvicorn
 
-    app = build_responder_app(me, other, port, max_turns, advertise_host=advertise_host)
+    app = build_responder_app(me, other, port, max_turns, advertise_url=advertise_url)
     print(f"{me.name} listening on http://{host}:{port}")
     uvicorn.run(app, host=host, port=port)
 
 
 async def run_responder_async(
-    me, other, port, max_turns, on_resolved=None, on_task_started=None, host="0.0.0.0", advertise_host="127.0.0.1"
+    me, other, port, max_turns, on_resolved=None, on_task_started=None, host="0.0.0.0", advertise_url=None
 ):
     """Same server, started as a background task instead of blocking the
     thread - so a movement loop can run alongside it. Returns the
@@ -343,7 +402,7 @@ async def run_responder_async(
     import uvicorn
 
     app = build_responder_app(
-        me, other, port, max_turns, on_resolved=on_resolved, on_task_started=on_task_started, advertise_host=advertise_host
+        me, other, port, max_turns, on_resolved=on_resolved, on_task_started=on_task_started, advertise_url=advertise_url
     )
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning"))
     task = asyncio.create_task(server.serve())
@@ -378,10 +437,10 @@ def decide_movement(obs, priority, my_name, other_name):
     return "wait"  # priority not yet known - hold at the boundary
 
 
-async def negotiate_as_initiator(me, other, peer_url, max_turns, webhook_port):
+async def negotiate_as_initiator(me, other, peer_url, max_turns, webhook_port, auth=False):
     if webhook_port:
-        return await run_initiator_webhook(me, other, peer_url, webhook_port, max_turns)
-    return await run_initiator(me, other, peer_url, max_turns)
+        return await run_initiator_webhook(me, other, peer_url, webhook_port, max_turns, auth=auth)
+    return await run_initiator(me, other, peer_url, max_turns, auth=auth)
 
 
 NEGOTIATION_TRACE_PATH = "experiments/results/negotiation_trace.json"
@@ -443,7 +502,8 @@ async def run_robot(
     webhook_port=None,
     debug_log=False,
     host="0.0.0.0",
-    advertise_host="127.0.0.1",
+    advertise_url=None,
+    auth=False,
 ):
     """--world-url, dynamic initiation (D18): every robot always runs its
     own A2A server AND its own movement loop AND is capable of dialing
@@ -552,7 +612,7 @@ async def run_robot(
         on_resolved=on_resolved,
         on_task_started=on_task_started,
         host=host,
-        advertise_host=advertise_host,
+        advertise_url=advertise_url,
     )
 
     try:
@@ -576,7 +636,7 @@ async def run_robot(
                         log_status(f"at boundary, sensing {other.name} - dialing")
                         comms_established_at["value"] = time.time()
                         dial_holder["task"] = asyncio.create_task(
-                            negotiate_as_initiator(me, other, peer_url, max_turns, webhook_port)
+                            negotiate_as_initiator(me, other, peer_url, max_turns, webhook_port, auth=auth)
                         )
 
                 dial_task = dial_holder["task"]
@@ -628,9 +688,14 @@ def main():
         help="Phase 7: 0.0.0.0 (not 127.0.0.1) so other containers on the same Compose network can reach this one - still reachable via localhost for plain local runs too.",
     )
     parser.add_argument(
-        "--advertise-host",
-        default="127.0.0.1",
-        help="Phase 7/D32: the address embedded in THIS robot's own AgentCard for peers to dial back to - not the bind address (--host). In Compose, set this to the service name (e.g. robot-a) so a2a-sdk's create_client(), which connects using the peer's self-reported card URL rather than the peer_url string alone, doesn't try to reach back through 127.0.0.1 from inside another container.",
+        "--advertise-url",
+        default=None,
+        help="Phase 7/D32, Phase 8/D33: the full URL embedded in THIS robot's own AgentCard for peers to dial back to - not the bind address (--host). Defaults to http://127.0.0.1:<port>, correct for plain local runs. In Compose, set to the service's own URL (e.g. http://robot-a:9001); on Cloud Run, its real HTTPS URL (no port) - a2a-sdk's create_client() connects using the peer's self-reported card URL, not the peer_url string alone, so this has to be the address that's actually reachable from wherever the peer runs.",
+    )
+    parser.add_argument(
+        "--auth",
+        action="store_true",
+        help="Phase 8/D33: fetch a real OIDC ID token (audience = peer_url) and attach it as Authorization: Bearer on every outbound A2A call - needed to call a Cloud Run service locked down with --no-allow-unauthenticated. Off by default - a plain local or Compose run has no GCP credentials to fetch a token with and doesn't need one.",
     )
     args = parser.parse_args()
 
@@ -651,7 +716,8 @@ def main():
                 webhook_port,
                 args.debug_log,
                 args.host,
-                args.advertise_host,
+                args.advertise_url,
+                args.auth,
             )
         )
         return 0
@@ -659,11 +725,15 @@ def main():
     if args.side == "a":
         print(f"{me.name} ({args.policy}) initiating {args.scenario} against {args.peer_url}")
         if args.webhook:
-            asyncio.run(run_initiator_webhook(me, other, args.peer_url, args.webhook_port, args.max_turns, host=args.host))
+            asyncio.run(
+                run_initiator_webhook(
+                    me, other, args.peer_url, args.webhook_port, args.max_turns, host=args.host, auth=args.auth
+                )
+            )
         else:
-            asyncio.run(run_initiator(me, other, args.peer_url, args.max_turns))
+            asyncio.run(run_initiator(me, other, args.peer_url, args.max_turns, auth=args.auth))
     else:
-        run_responder(me, other, args.port, args.max_turns, host=args.host, advertise_host=args.advertise_host)
+        run_responder(me, other, args.port, args.max_turns, host=args.host, advertise_url=args.advertise_url)
     return 0
 
 
