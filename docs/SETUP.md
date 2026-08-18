@@ -13,6 +13,8 @@ The setup this project was built on, and how to recreate it.
 | GitHub account | `jspiniakdev` | Where the private repo lives. |
 | Editor | VS Code | Interpreter must be set to `.venv` (Cmd+Shift+P → *Python: Select Interpreter*). |
 | Docker | **Docker Desktop**, via `brew install --cask docker` | Phase 7 (D32) - Compose runs the fleet. `docker`/`docker compose` need Docker Desktop actually launched (the whale icon in the menu bar) before either command works, not just installed. |
+| GCP CLI | **gcloud**, via `brew install --cask google-cloud-sdk` | Phase 8 (D33) - deploying to Cloud Run. Active account: `jspiniak@gmail.com` (`gcloud config set account ...` if another account is also authenticated - `gcloud auth list` shows all of them). |
+| GCP project | `corridor-agents` (project number `433484676345`), under org `866252710860` | Billing already enabled. Region used throughout: `us-central1`. |
 | Assistant | Claude Code (`~/.local/bin/claude`) | Requires `~/.local/bin` on PATH. |
 
 ## Recreate it
@@ -55,3 +57,12 @@ python run.py --a llm --b llm
   context. Docker Desktop also needs to actually be launched once
   (`open -a Docker`, approve the one-time permission dialog) before
   `docker`/`docker compose` work at all - installed isn't the same as running.
+- The `corridor-agents` GCP project is fresh and under an organization,
+  which meant several IAM grants Google used to hand out automatically on
+  new projects had to be added by hand before Cloud Run deploys would work
+  at all - `roles/storage.objectViewer`, `roles/logging.logWriter`, and
+  `roles/artifactregistry.writer`, all on the default compute service
+  account (`433484676345-compute@developer.gserviceaccount.com`). Full
+  story (including how each one was actually diagnosed) in
+  `docs/DECISIONS.md` D33 - worth reading before assuming a fresh GCP
+  project "just works" the way it used to.
