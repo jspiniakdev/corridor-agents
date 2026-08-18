@@ -657,3 +657,196 @@ transitioning in true lockstep (a synchronized global tick actually
 mattering, not just each robot's own local decision) - that would justify
 reintroducing something like the independent clock this decision removed,
 but nothing in this project currently needs that.
+
+---
+
+## D18 — Boundary-triggered dynamic initiation: every robot can dial, races resolved by jitter + tiebreak + cancellation
+
+**Decided:** `agent.py`'s `--side a`/`--side b` split no longer means
+"client-only" vs "server-only." `run_initiator_with_world`/
+`run_responder_with_world` collapse into one `run_robot()` - every robot
+always runs its own A2A server (`run_responder_async`) *and* its own
+movement loop, and is capable of dialing the peer the instant its own
+`get_observation()` says it's at the boundary and can sense the other.
+`--side` now only picks which half of the scenario to load (D16) and
+which robot name to use.
+
+**Mechanism:** the dial is jittered - a one-time random deadline
+(`now + random.uniform(0, 1.0)`) computed the moment the trigger
+condition first becomes true, checked against `time.monotonic()` each
+loop iteration rather than slept inline, so the loop keeps
+polling/proposing the whole time. When the deadline passes, the dial
+runs as a cancellable `asyncio.Task`, not an inline `await`.
+`NegotiationExecutor` gained `on_task_started` (fires once, with the
+peer's name, the instant a brand-new incoming task arrives - earlier
+than the existing `on_resolved`, which only fires once a negotiation
+*concludes*). The race case (both robots dial before either sees the
+other's incoming call) is resolved with full cancellation: whichever
+robot loses a fixed, deterministic tiebreak (lexicographically smaller
+name wins - "Robot A" always wins a tie) cancels its own outbound
+`asyncio.Task` the instant it learns of the incoming one - before
+wasting a policy call, not after. Verified live, repeatedly: the same
+scenario correctly resolves to the same ground-truth-correct outcome
+regardless of which side actually ends up dialing, and a genuinely
+forced race shows the exact `"race - {peer} called in while I was
+dialing - deferring"` cancellation line, with the negotiation still
+concluding correctly through the surviving task.
+
+**Two real bugs, both found only by running this live - the plan
+anticipated the race but not either of these:**
+
+1. **A dial that fails (e.g. the peer's server socket isn't bound yet)
+   crashed the entire robot process.** `dial_task.result()` re-raises
+   whatever exception the task ended with; nothing caught it. Fixed by
+   checking `dial_task.exception()` first - a failed dial now logs a
+   warning and resets the jitter deadline so a fresh attempt gets
+   scheduled on a later loop iteration, instead of taking the whole
+   process down. A real robot doesn't die because it called a peer a
+   moment too early.
+
+2. **A robot could start a *second*, redundant dial while it was
+   already the responder on an active incoming negotiation.**
+   `on_task_started` only cancels an outbound dial that's *already in
+   flight* - it does nothing to stop a *new* one from starting later,
+   because `priority_holder` (what the movement loop checks before
+   deciding to dial) only gets set once a negotiation *concludes*
+   (`on_resolved`), not when one *starts*. With a slow LLM call widening
+   the window, the responding side's own movement loop reached its
+   jitter deadline mid-negotiation and dialed the peer it was already
+   talking to - two simultaneous negotiations between the same two
+   robots. Fixed with a third piece of state, `incoming_active`, set
+   `True` in `on_task_started` and cleared in `on_resolved` - the
+   movement loop now checks it before ever starting a new dial, not just
+   before letting an in-flight one continue. This is the more important
+   of the two fixes: the in-flight-cancellation mechanism the plan
+   designed for handles simultaneous starts, but says nothing about
+   preventing a start *during* an already-active negotiation - a gap the
+   plan's design section didn't anticipate because it was reasoning about
+   the moment two dials begin, not the whole duration one stays open.
+
+**A pre-existing limitation, unchanged:** `LLMPolicy.respond()` is still
+a synchronous call inside an `async def` (D15) - a slow LLM call blocks
+the entire process, including its own race-detection and world-polling,
+for the duration of that call. Not fixed here, as planned.
+
+**Would change our mind:** if `JITTER_SECONDS=1.0` turns out to still
+produce races often enough in practice to be annoying (rather than the
+rare, correctly-handled case observed in testing) - worth widening it,
+or reconsidering whether the tiebreak should be primary rather than a
+fallback, if evidence suggests otherwise.
+
+---
+
+## D19 — The network visualizer reconstructs priority after the fact; the template didn't change at all
+
+**Decided:** `visualize_network.py` is a new, small post-hoc tool -
+`visualize_template.html` is reused completely unchanged, same split
+Phase 3 already used (D13): only the data-builder is new. It fetches a
+completed episode's movement log from `world_server.py` over MCP
+(`get_map` + the new `get_log` tool) and reads
+`experiments/results/negotiation_trace.json` if a negotiation happened -
+written by whichever robot's `agent.py` process ends up holding the full
+transcript when a negotiation concludes (`write_negotiation_trace()`,
+called from both the dial-success path and `on_resolved`, since either
+side can now be the one who learns the outcome first - D18 made this
+genuinely either-or, not fixed to one side).
+
+**Why priority has to be reconstructed, not read:** `world_server.py`'s
+log has no concept of priority at all, by design (D17) - the world only
+ever sees move/wait proposals, never who negotiated what or why. So
+`visualize_network.py` infers it after the fact from the simplest signal
+the log actually contains: a robot "has priority" from the first log
+entry where it successfully moves off its own boundary position -
+whether that was negotiated or claimed for free, that's the moment "who
+goes first" became real, and it's derivable from `a_position`/`b_position`
+alone with no reference to *why* the world allowed it. That same index
+also anchors where the negotiation dialogue gets attached in the replay,
+if one happened - not a claim of matching some real "tick" the way Phase
+3's single-process design had one, since the world channel and the
+negotiation channel are now genuinely asynchronous and don't share a
+clock.
+
+**Rejected:** trying to correlate world-log timing with A2A message
+timing precisely (e.g. threading a shared timestamp or tick counter
+through both channels). Not worth the complexity for a debugging
+visualization - D4b already establishes that the world and negotiation
+channels are deliberately separate and shouldn't be coupled; adding
+timing correlation between them would be exactly the kind of coupling
+that principle warns against, just for cosmetic replay accuracy.
+
+**Verified:** a real live episode's generated `episode_data` was
+inspected directly (not just assumed correct from the code) - the log
+correctly shows both robots holding at their boundaries while the A2A
+negotiation happens off in its own channel (multiple consecutive
+`wait`/`wait` rows with `priority: null`), priority flips to the winner
+at exactly the row where that robot's position first moves past its
+boundary, `negotiation.tick` lands on that same row, and the messages
+match the real negotiation transcript. The "no negotiation, arrived
+alone" code path was verified separately with hand-built data, since
+(same as Phase 3) the project's fixed grid geometry and `SENSOR_RANGE`
+mean every real scenario run always senses a conflict by the boundary -
+that path was never naturally reachable through a live run in Phase 3
+either.
+
+**Would change our mind:** if a future phase makes the grid/sensor
+geometry configurable enough that "arrived alone" becomes a real,
+reachable outcome - worth adding a live end-to-end check for it then,
+not just the hand-built one.
+
+---
+
+## D20 — "Tick" was a lie in the network visualizer; real timestamps replace it
+
+**Decided:** `world_server.py`'s log entries now carry a real
+`time.time()` timestamp per `propose_action` call, returned by
+`get_log()`. `visualize_network.py` drops the word "tick" entirely -
+`entry.tick` becomes `entry.step` (a plain sequence index, no claim of
+synchronization) and each row carries `elapsed_ms`, the real time since
+the previous entry. `visualize_template.html` - genuinely shared between
+Phase 3's `visualize.py` and this - detects which shape it was given
+(`log[0].step !== undefined`) and behaves accordingly: Phase 3 data still
+gets "tick" labels and the fixed `TICK_DELAY_MS` pacing unchanged; step
+data gets "step" labels and per-row delay from real `elapsed_ms`, clamped
+to [300ms, 3000ms] so a near-instant real gap stays visible and a long
+one doesn't force a multi-second wait in autoplay.
+
+**Why:** raised directly by the user reviewing the visualizer - Phase
+3's "tick" was real (one process, one `step()` call, both robots decided
+and applied together). Once the world stopped having a shared clock
+(D17), each log entry became one robot's independent, serialized commit,
+arriving whenever its own async loop happened to call in. Labeling these
+"tick 5," "tick 6" as if they were synchronized steps was quietly
+reintroducing a false synchronization the system doesn't have - it hid
+two real distortions: genuinely near-simultaneous events (two robots
+proposing within milliseconds of each other) got serialized into
+strictly-ordered ticks as if one meaningfully preceded the other, and a
+genuine multi-second gap (e.g., a slow LLM negotiation) was invisible,
+since consecutive step numbers always increment by 1 regardless of how
+much real time passed.
+
+**Rejected:** leaving the label as "tick" and treating it as a cosmetic
+issue. It wasn't cosmetic - the whole point of the visualizer (D13) is to
+build an accurate mental model of what actually happened, and a fake
+synchronized clock actively works against that for the one thing this
+phase's architecture most needs explaining: that the world and
+negotiation channels are genuinely asynchronous now.
+
+**Scope boundary, deliberate:** only movement/step pacing uses real
+elapsed time. Negotiation dialogue reveal still uses the fixed
+`MESSAGE_DELAY_MS`/`DECISION_DELAY_MS` - those are about giving a human
+reader time to read each line, not about reproducing real LLM latency
+(nobody wants to actually sit through a real multi-second API call while
+watching a replay), and the negotiation trace file doesn't carry
+per-message timestamps to do that with anyway.
+
+**Verified:** live episode inspection shows realistic elapsed_ms values
+(mostly ~0-215ms, matching the movement loop's ~0.2s poll interval) at
+every step including around the negotiation step, and confirmed Phase
+3's `visualize.py` output is byte-for-byte the same shape as before (no
+`step`/`elapsed_ms` fields at all) - the template's shape-detection
+correctly falls back to the old tick-based behavior for it, unchanged.
+
+**Would change our mind:** if the negotiation trace ever gains real
+per-message timestamps (e.g., to show LLM thinking time in the replay
+the same way the live streaming heartbeat does) - worth extending the
+dialogue reveal to use real elapsed time too, at that point.

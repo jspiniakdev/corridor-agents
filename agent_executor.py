@@ -56,30 +56,42 @@ class NegotiationExecutor(AgentExecutor):
     agent.py builds today; `other` stays a placeholder with no real secret,
     same isolation guarantee as Phase 4.
 
-    `on_resolved`, if given, is called once with the negotiated outcome
-    (a robot name, or None for a deadlock) the moment this side of the
-    negotiation learns it. This robot never initiates a negotiation itself
-    (Phase 6 keeps the fixed --side a convention, see D17) - it only ever
-    reacts to an incoming task - so this callback is the one way its own
-    world-movement loop finds out priority was decided at all."""
+    `on_resolved`, if given, is called once with (outcome, history) - the
+    negotiated outcome (a robot name, or None for a deadlock) and the
+    full message transcript - the moment this side of the negotiation
+    learns it. This is the one way a world-movement loop finds out
+    priority was decided by an *incoming* negotiation (since that happens
+    entirely inside execute(), not in the loop's own coroutine), and the
+    only way it can write out a full trace file afterward - see D19.
 
-    def __init__(self, me, other, max_turns, on_resolved=None):
+    `on_task_started`, if given, is called once - with the peer's name -
+    the instant a brand-new task arrives, *before* any policy call. This
+    is earlier than on_resolved on purpose: it's how dynamic initiation
+    (D18) detects a race (this robot also has its own outbound dial in
+    flight) early enough to cancel it before wasting an LLM call, not
+    after the incoming negotiation has already run its course."""
+
+    def __init__(self, me, other, max_turns, on_resolved=None, on_task_started=None):
         self.me = me
         self.other = other
         self.max_turns = max_turns
         self.on_resolved = on_resolved
+        self.on_task_started = on_task_started
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        is_new_task = context.current_task is None
         task, history = history_from_context(context)
-        if context.current_task is None:
+        if is_new_task:
             await event_queue.enqueue_event(task)
+            if self.on_task_started:
+                self.on_task_started(self.other.name)
 
         updater = TaskUpdater(event_queue, task.id, task.context_id)
 
         if not should_respond(history, self.max_turns):
             # already agreed, or out of turns - nothing more to say
             if self.on_resolved:
-                self.on_resolved(check_agreement(history))
+                self.on_resolved(check_agreement(history), history)
             await updater.complete()
             return
 
@@ -96,7 +108,7 @@ class NegotiationExecutor(AgentExecutor):
         outcome = check_agreement(history + [reply])
         if outcome is not None:
             if self.on_resolved:
-                self.on_resolved(outcome)
+                self.on_resolved(outcome, history + [reply])
             await updater.complete(message=reply_message)
         else:
             await updater.requires_input(message=reply_message)

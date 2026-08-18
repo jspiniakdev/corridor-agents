@@ -15,7 +15,7 @@ from a2a.types.a2a_pb2 import Role, StreamResponse
 
 from scenarios import SCENARIOS  # noqa: E402
 from wire import message_to_dict  # noqa: E402
-from agent import build_robots, extract_reply  # noqa: E402
+from agent import build_robots, extract_reply, is_my_turn_to_initiate  # noqa: E402
 
 
 def test_build_robots_side_a_gets_the_real_secret_and_b_is_a_placeholder():
@@ -74,3 +74,8 @@ def test_extract_reply_reads_state_and_message_from_a_status_update():
 
 def test_extract_reply_returns_nothing_for_an_unrelated_event():
     assert extract_reply(StreamResponse()) == (None, None)
+
+
+def test_is_my_turn_to_initiate_robot_a_wins_ties():
+    assert is_my_turn_to_initiate("Robot A", "Robot B") is True
+    assert is_my_turn_to_initiate("Robot B", "Robot A") is False

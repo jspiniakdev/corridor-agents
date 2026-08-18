@@ -32,6 +32,7 @@ robot's own guess is provisional until the world confirms it).
 
 import argparse
 import sys
+import time
 
 sys.path.insert(0, "src")
 
@@ -137,8 +138,34 @@ def propose_action(side: str, action: str) -> dict:
         apply(STATE, "wait", resolved)
         position = STATE.b.position
 
-    STATE.log.append((side, action, resolved, STATE.a.position, STATE.b.position))
+    STATE.log.append((side, action, resolved, STATE.a.position, STATE.b.position, time.time()))
     return {"accepted": resolved == action, "actual_position": position}
+
+
+@mcp.tool()
+def get_log() -> dict:
+    """The full history of committed actions, one entry per propose_action
+    call, for whichever process wants to reconstruct what actually
+    happened after the fact - see visualize_network.py, D19/D20. Not used
+    by agent.py itself; this is purely for later inspection.
+
+    Includes a real wall-clock timestamp per entry (D20) - there's no
+    shared tick anymore (each entry is one robot's independent, serialized
+    commit), so "how much real time actually passed between these two
+    events" is only recoverable from real timestamps, not from entry
+    order alone."""
+    entries = [
+        {
+            "side": side,
+            "action": action,
+            "resolved": resolved,
+            "a_position": a_pos,
+            "b_position": b_pos,
+            "timestamp": timestamp,
+        }
+        for side, action, resolved, a_pos, b_pos, timestamp in STATE.log
+    ]
+    return {"entries": entries}
 
 
 def main():

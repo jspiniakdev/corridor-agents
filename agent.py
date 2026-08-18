@@ -1,36 +1,42 @@
 #!/usr/bin/env python3
-"""Phase 5: run one robot as its own process, negotiating over real A2A
-instead of the homemade comms_server board Phase 4 used. See docs/PLAN.md
-§5, D15.
+"""Phase 5: run one robot as its own process, negotiating over real A2A.
+See docs/PLAN.md §5, D15.
 
-There's no more shared board - A2A is peer to peer. For this pass (core
-swap: agent cards + task lifecycle over plain request/response - see the
-plan's staged scope), the two robots play asymmetric roles, same as which
-side moves first under Phase 4's `--side` convention:
-
-  --side a  is the INITIATOR - a pure A2A client. It never runs a server;
-            it opens the negotiation task against the peer's URL.
-  --side b  is the RESPONDER - a pure A2A server, hosting
-            agent_executor.NegotiationExecutor. It never calls out.
-
-A real fleet would have every robot able to play either role - Phase 5
-just doesn't need that yet with two robots and one negotiation per run.
+Without --world-url: negotiation only, fixed roles (Phase 5's original
+shape) - --side a is the INITIATOR (a pure A2A client, dials the peer),
+--side b is the RESPONDER (a pure A2A server, hosts
+agent_executor.NegotiationExecutor).
 
     Terminal 1: python agent.py --scenario <id> --side b --policy always_yield --port 9001
     Terminal 2: python agent.py --scenario <id> --side a --policy stubborn --peer-url http://127.0.0.1:9001
+
+With --world-url (Phase 6/D17, dynamic initiation D18): every robot plays
+BOTH roles at once - always an A2A server (run_robot), and capable of
+dialing the peer the instant its own observation says it's at the
+boundary and can sense the other. --side now only picks which half of
+the scenario to load (D16) and which robot name to use - it no longer
+means "client-only" vs "server-only".
+
+    Terminal 1: python world_server.py --port 9500
+    Terminal 2: python agent.py --scenario <id> --side b --policy always_yield --port 9002 --peer-url http://127.0.0.1:9001 --world-url http://127.0.0.1:9500/mcp
+    Terminal 3: python agent.py --scenario <id> --side a --policy stubborn  --port 9001 --peer-url http://127.0.0.1:9002 --world-url http://127.0.0.1:9500/mcp
 """
 
 import argparse
 import asyncio
+import random
 import sys
+import time
 
 sys.path.insert(0, "src")
 
 from negotiation import POLICIES, Robot, check_agreement  # noqa: E402
 from scenarios import BY_ID, SCENARIOS, for_side  # noqa: E402
-from wire import message_from_dict, message_to_dict  # noqa: E402
+from wire import history_to_list, message_from_dict, message_to_dict  # noqa: E402
 
 from agent_executor import NegotiationExecutor  # noqa: E402
+
+JITTER_SECONDS = 1.0
 
 
 def build_robots(side, scenario_id, policy_name):
@@ -47,6 +53,14 @@ def build_robots(side, scenario_id, policy_name):
         me = Robot("Robot B", situation, urgency, POLICIES[policy_name]())
         other = Robot("Robot A", "", 0)
     return me, other
+
+
+def is_my_turn_to_initiate(me_name, other_name):
+    """The race-case tiebreak (D18): lexicographically smaller name wins -
+    "Robot A" always wins a tie against "Robot B". A fixed rule both sides
+    compute identically with zero coordination, same as real "glare"
+    resolution in telecom signaling."""
+    return me_name < other_name
 
 
 def report_outcome(me, history, max_turns):
@@ -79,7 +93,9 @@ async def run_initiator(me, other, peer_url, max_turns):
     """The --side a client loop: send a message, read back whatever the
     responder's TaskUpdater published, and keep going until the task
     reaches a terminal state. Holds the connection open the whole time -
-    see run_initiator_webhook for the alternative that doesn't."""
+    see run_initiator_webhook for the alternative that doesn't. Returns
+    (outcome, history) - D19 needs the full transcript, not just the
+    outcome, to write a trace file."""
     from a2a.client import create_client
     from a2a.helpers import get_data_parts, new_data_message
     from a2a.types.a2a_pb2 import Role, SendMessageRequest, TaskState
@@ -91,7 +107,7 @@ async def run_initiator(me, other, peer_url, max_turns):
 
     while True:
         if check_agreement(history) is not None or len(history) >= max_turns:
-            return report_outcome(me, history, max_turns)
+            return report_outcome(me, history, max_turns), history
 
         my_message = me.policy.respond(me, other, history, max_turns)
         print(f"  {my_message}")
@@ -128,7 +144,7 @@ async def run_initiator(me, other, peer_url, max_turns):
             history.append(peer_reply)
 
         if final_state == TaskState.TASK_STATE_COMPLETED:
-            return report_outcome(me, history, max_turns)
+            return report_outcome(me, history, max_turns), history
 
 
 async def run_initiator_webhook(me, other, peer_url, webhook_port, max_turns):
@@ -176,8 +192,7 @@ async def run_initiator_webhook(me, other, peer_url, webhook_port, max_turns):
     try:
         while True:
             if check_agreement(history) is not None or len(history) >= max_turns:
-                report_outcome(me, history, max_turns)
-                return
+                return report_outcome(me, history, max_turns), history
 
             my_message = me.policy.respond(me, other, history, max_turns)
             print(f"  {my_message}")
@@ -223,18 +238,18 @@ async def run_initiator_webhook(me, other, peer_url, webhook_port, max_turns):
                 history.append(peer_reply)
 
             if final_state == TaskState.TASK_STATE_COMPLETED:
-                report_outcome(me, history, max_turns)
-                return
+                return report_outcome(me, history, max_turns), history
     finally:
         server.should_exit = True
         await server_task
 
 
-def build_responder_app(me, other, port, max_turns, on_resolved=None):
-    """The A2A server app for --side b: always wired for push
-    notifications - dormant unless a caller actually registers a callback
-    URL (run_initiator never does; run_initiator_webhook does).
-    `on_resolved` is threaded through to NegotiationExecutor - see D17."""
+def build_responder_app(me, other, port, max_turns, on_resolved=None, on_task_started=None):
+    """The A2A server app, always wired for push notifications - dormant
+    unless a caller actually registers a callback URL (run_initiator
+    never does; run_initiator_webhook does). `on_resolved`/
+    `on_task_started` are threaded through to NegotiationExecutor - see
+    D17, D18."""
     import httpx
     from a2a.server.request_handlers import DefaultRequestHandler
     from a2a.server.routes import add_a2a_routes_to_fastapi, create_agent_card_routes, create_jsonrpc_routes
@@ -261,7 +276,9 @@ def build_responder_app(me, other, port, max_turns, on_resolved=None):
     push_config_store = InMemoryPushNotificationConfigStore()
     push_sender = BasePushNotificationSender(httpx.AsyncClient(), push_config_store)
     request_handler = DefaultRequestHandler(
-        agent_executor=NegotiationExecutor(me, other, max_turns, on_resolved=on_resolved),
+        agent_executor=NegotiationExecutor(
+            me, other, max_turns, on_resolved=on_resolved, on_task_started=on_task_started
+        ),
         task_store=InMemoryTaskStore(),
         agent_card=card,
         push_config_store=push_config_store,
@@ -287,7 +304,7 @@ def run_responder(me, other, port, max_turns):
     uvicorn.run(app, host="127.0.0.1", port=port)
 
 
-async def run_responder_async(me, other, port, max_turns, on_resolved=None):
+async def run_responder_async(me, other, port, max_turns, on_resolved=None, on_task_started=None):
     """Same server, started as a background task instead of blocking the
     thread - so a movement loop can run alongside it. Returns the
     (server, task) pair; caller is responsible for server.should_exit +
@@ -295,7 +312,7 @@ async def run_responder_async(me, other, port, max_turns, on_resolved=None):
     for its own webhook receiver."""
     import uvicorn
 
-    app = build_responder_app(me, other, port, max_turns, on_resolved=on_resolved)
+    app = build_responder_app(me, other, port, max_turns, on_resolved=on_resolved, on_task_started=on_task_started)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     task = asyncio.create_task(server.serve())
     while not server.started:
@@ -329,71 +346,114 @@ def decide_movement(obs, priority, my_name, other_name):
     return "wait"  # priority not yet known - hold at the boundary
 
 
-async def run_initiator_with_world(me, other, peer_url, world_url, max_turns, webhook_port=None):
-    """--side a, --world-url: moves freely until its own observation says
-    it's at the boundary. Only then, and only if it can actually sense the
-    other robot, does it negotiate - matching Phase 3's original physical
-    logic (D12), now driven by a real MCP observation instead of an
-    in-process simulator check. Arriving at the boundary alone claims
-    priority for free, zero negotiation, same as Phase 3."""
-    from mcp.client import Client
-
-    priority = None
-    async with Client(world_url) as world:
-        while True:
-            obs = await mcp_call(world, "get_observation", side="a")
-            if obs["reached_target"]:
-                print(f"{me.name}: reached target")
-                return
-
-            if obs["at_boundary"] and priority is None:
-                if obs["sensed_other"]:
-                    print(f"{me.name}: at boundary, sensing {other.name} - negotiating")
-                    if webhook_port:
-                        priority = await run_initiator_webhook(me, other, peer_url, webhook_port, max_turns)
-                    else:
-                        priority = await run_initiator(me, other, peer_url, max_turns)
-                else:
-                    priority = me.name
-                    print(f"{me.name}: at boundary alone - claiming priority")
-
-            action = decide_movement(obs, priority, me.name, other.name)
-            await mcp_call(world, "propose_action", side="a", action=action)
-            await asyncio.sleep(0.2)
+async def negotiate_as_initiator(me, other, peer_url, max_turns, webhook_port):
+    if webhook_port:
+        return await run_initiator_webhook(me, other, peer_url, webhook_port, max_turns)
+    return await run_initiator(me, other, peer_url, max_turns)
 
 
-async def run_responder_with_world(me, other, port, world_url, max_turns):
-    """--side b, --world-url: runs the A2A server (reactive to whatever A
-    sends, whenever A gets around to it) concurrently with its own
-    movement loop. B never initiates (D17 keeps the fixed --side a
-    convention this phase) - if it's at the boundary and senses A, it just
-    waits; on_resolved is how it finds out priority was ever decided at
-    all, since that happens inside NegotiationExecutor.execute(), not in
-    this coroutine."""
+NEGOTIATION_TRACE_PATH = "experiments/results/negotiation_trace.json"
+
+
+def write_negotiation_trace(history):
+    """Whichever robot ends up holding the full transcript - either side,
+    now that initiation is dynamic (D18) - writes it out once the
+    negotiation concludes, so visualize_network.py can render it
+    afterward. No file at all if an episode never negotiates (a robot
+    arrived at its boundary alone). See D19."""
+    import json
+    import os
+
+    os.makedirs(os.path.dirname(NEGOTIATION_TRACE_PATH), exist_ok=True)
+    with open(NEGOTIATION_TRACE_PATH, "w") as f:
+        json.dump(history_to_list(history), f, indent=2)
+    print(f"wrote {NEGOTIATION_TRACE_PATH}")
+
+
+async def run_robot(me, other, side, port, peer_url, world_url, max_turns, webhook_port=None):
+    """--world-url, dynamic initiation (D18): every robot always runs its
+    own A2A server AND its own movement loop AND is capable of dialing
+    the peer - the fixed --side a/--side b role split from Phase 6 is
+    gone. Negotiation still only fires once this robot's own observation
+    says it's at the boundary and can actually sense the other (D12's
+    physical logic, unchanged) - arriving alone still claims priority for
+    free, zero negotiation.
+
+    The dial itself is jittered (a random delay before dialing, not
+    inline - the loop keeps polling/proposing while it waits) and run as
+    a cancellable background task. Two race scenarios, both handled -
+    see D18:
+    1. An incoming task starts while this robot is ALREADY mid-dial ->
+       on_task_started cancels the losing side's outbound attempt.
+    2. An incoming task is already active (started, not yet resolved)
+       when this robot's own jitter deadline would otherwise fire -
+       incoming_active blocks a *second*, redundant dial from ever
+       starting in the first place. Caught live: without this, a slow
+       LLM negotiation left enough of a window for the responding side's
+       own movement loop to independently start dialing the peer it was
+       already mid-negotiation with."""
     from mcp.client import Client
 
     priority_holder = {"value": None}
+    dial_holder = {"task": None}
+    jitter_deadline = {"value": None}
+    incoming_active = {"value": False}
 
-    def on_resolved(outcome):
+    def on_resolved(outcome, history):
         priority_holder["value"] = outcome
+        incoming_active["value"] = False
         print(f"{me.name}: negotiated outcome (incoming task): {outcome}")
+        write_negotiation_trace(history)
 
-    server, server_task = await run_responder_async(me, other, port, max_turns, on_resolved=on_resolved)
+    def on_task_started(peer_name):
+        incoming_active["value"] = True
+        dial_task = dial_holder["task"]
+        if dial_task is not None and not dial_task.done() and not is_my_turn_to_initiate(me.name, peer_name):
+            print(f"{me.name}: race - {peer_name} called in while I was dialing - deferring")
+            dial_task.cancel()
+
+    server, server_task = await run_responder_async(
+        me, other, port, max_turns, on_resolved=on_resolved, on_task_started=on_task_started
+    )
 
     try:
         async with Client(world_url) as world:
             while True:
-                obs = await mcp_call(world, "get_observation", side="b")
+                obs = await mcp_call(world, "get_observation", side=side)
                 if obs["reached_target"]:
                     print(f"{me.name}: reached target")
                     return
 
-                if obs["at_boundary"] and priority_holder["value"] is None and not obs["sensed_other"]:
-                    priority_holder["value"] = me.name
-                    print(f"{me.name}: at boundary alone - claiming priority")
+                if priority_holder["value"] is None and obs["at_boundary"]:
+                    if not obs["sensed_other"]:
+                        priority_holder["value"] = me.name
+                        print(f"{me.name}: at boundary alone - claiming priority")
+                    elif dial_holder["task"] is None and not incoming_active["value"]:
+                        if jitter_deadline["value"] is None:
+                            jitter_deadline["value"] = time.monotonic() + random.uniform(0, JITTER_SECONDS)
+                        elif time.monotonic() >= jitter_deadline["value"]:
+                            print(f"{me.name}: at boundary, sensing {other.name} - dialing")
+                            dial_holder["task"] = asyncio.create_task(
+                                negotiate_as_initiator(me, other, peer_url, max_turns, webhook_port)
+                            )
+
+                dial_task = dial_holder["task"]
+                if dial_task is not None and dial_task.done():
+                    if not dial_task.cancelled():
+                        error = dial_task.exception()
+                        if error is not None:
+                            # a real robot doesn't die because it called a
+                            # peer a moment too early - log it and let a
+                            # fresh dial get scheduled on a later iteration
+                            print(f"{me.name}: dial failed ({error}) - will retry")
+                            jitter_deadline["value"] = None
+                        else:
+                            priority_holder["value"], dial_history = dial_task.result()
+                            write_negotiation_trace(dial_history)
+                    dial_holder["task"] = None
 
                 action = decide_movement(obs, priority_holder["value"], me.name, other.name)
-                await mcp_call(world, "propose_action", side="b", action=action)
+                await mcp_call(world, "propose_action", side=side, action=action)
                 await asyncio.sleep(0.2)
     finally:
         server.should_exit = True
@@ -405,28 +465,24 @@ def main():
     parser.add_argument("--scenario", default=SCENARIOS[0].id, choices=list(BY_ID))
     parser.add_argument("--side", required=True, choices=["a", "b"])
     parser.add_argument("--policy", required=True, choices=list(POLICIES))
-    parser.add_argument("--port", type=int, default=9001, help="side b only: this robot's own A2A server port")
-    parser.add_argument("--peer-url", default="http://127.0.0.1:9001", help="side a only: the responder's URL")
+    parser.add_argument("--port", type=int, default=9001, help="this robot's own A2A server port (without --world-url: side b only)")
+    parser.add_argument("--peer-url", default="http://127.0.0.1:9001", help="the peer's URL (without --world-url: side a only)")
     parser.add_argument("--max-turns", type=int, default=6)
     parser.add_argument(
         "--webhook",
         action="store_true",
-        help="side a only: don't hold the connection open - register a callback and wait to be called back",
+        help="when dialing, don't hold the connection open - register a callback and wait to be called back",
     )
-    parser.add_argument("--webhook-port", type=int, default=9002, help="side a only, with --webhook: this robot's own callback port")
-    parser.add_argument("--world-url", default=None, help="Phase 6: also move through world_server.py's grid, negotiating only at the boundary")
+    parser.add_argument("--webhook-port", type=int, default=9002, help="this robot's own callback port, with --webhook")
+    parser.add_argument("--world-url", default=None, help="Phase 6/D18: also move through world_server.py's grid, negotiating dynamically at the boundary")
     args = parser.parse_args()
 
     me, other = build_robots(args.side, args.scenario, args.policy)
 
     if args.world_url:
-        if args.side == "a":
-            print(f"{me.name} ({args.policy}) moving via {args.world_url}, negotiating {args.scenario} against {args.peer_url} at the boundary")
-            webhook_port = args.webhook_port if args.webhook else None
-            asyncio.run(run_initiator_with_world(me, other, args.peer_url, args.world_url, args.max_turns, webhook_port))
-        else:
-            print(f"{me.name} ({args.policy}) moving via {args.world_url}")
-            asyncio.run(run_responder_with_world(me, other, args.port, args.world_url, args.max_turns))
+        print(f"{me.name} ({args.policy}) moving via {args.world_url}, ready to negotiate {args.scenario} at the boundary")
+        webhook_port = args.webhook_port if args.webhook else None
+        asyncio.run(run_robot(me, other, args.side, args.port, args.peer_url, args.world_url, args.max_turns, webhook_port))
         return 0
 
     if args.side == "a":

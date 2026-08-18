@@ -79,3 +79,33 @@ def test_propose_action_only_moves_the_requesting_side():
     reset_state()
     ws.propose_action("a", "move")
     assert ws.STATE.b.position == 8  # untouched by A's call
+
+
+def test_get_log_starts_empty():
+    reset_state()
+    assert ws.get_log() == {"entries": []}
+
+
+def test_get_log_records_each_committed_action_in_order():
+    reset_state()
+    ws.propose_action("a", "move")
+    ws.propose_action("b", "wait")
+
+    entries = ws.get_log()["entries"]
+
+    assert len(entries) == 2
+    for entry in entries:
+        assert isinstance(entry.pop("timestamp"), float)  # real wall clock (D20) - checked separately, not for equality
+    assert entries[0] == {"side": "a", "action": "move", "resolved": "move", "a_position": 2, "b_position": 8}
+    assert entries[1] == {"side": "b", "action": "wait", "resolved": "wait", "a_position": 2, "b_position": 8}
+
+
+def test_get_log_timestamps_are_monotonically_non_decreasing():
+    reset_state()
+    ws.propose_action("a", "move")
+    ws.propose_action("b", "wait")
+    ws.propose_action("a", "move")
+
+    timestamps = [entry["timestamp"] for entry in ws.get_log()["entries"]]
+
+    assert timestamps == sorted(timestamps)

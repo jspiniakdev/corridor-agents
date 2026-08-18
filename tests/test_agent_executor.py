@@ -1,22 +1,25 @@
 """Tests for agent_executor.py - the responder side of a Phase 5
 negotiation. Builds real a2a Task/Message protobuf objects (via a2a's own
-helpers), but never a real server, RequestContext, or network call - a
-small stand-in object with just .current_task/.message covers what
-history_from_context actually reads. Zero API calls, same style as every
-other test in this project.
+helpers), but never a real server or network call - a small stand-in
+object with just .current_task/.message covers what history_from_context
+actually reads, and the real (concrete) EventQueueSource covers what
+NegotiationExecutor.execute() needs to run for real. Zero API calls, same
+style as every other test in this project.
 """
 
+import asyncio
 import sys
 
 sys.path.insert(0, ".")
 sys.path.insert(0, "src")
 
 from a2a.helpers import new_task_from_user_message  # noqa: E402
+from a2a.server.events.event_queue_v2 import EventQueueSource  # noqa: E402
 from a2a.types.a2a_pb2 import Role, TaskState, TaskStatus  # noqa: E402
 
-from negotiation import Intent, Message  # noqa: E402
+from negotiation import Intent, Message, Robot, Stubborn  # noqa: E402
 from wire import message_to_dict  # noqa: E402
-from agent_executor import history_from_context, should_respond  # noqa: E402
+from agent_executor import NegotiationExecutor, history_from_context, should_respond  # noqa: E402
 
 
 class FakeContext:
@@ -78,3 +81,40 @@ def test_should_respond_is_false_once_agreement_is_reached():
 def test_should_respond_is_false_once_max_turns_is_reached():
     history = [Message("Robot A", Intent.PROPOSE, "Robot A")] * 6
     assert should_respond(history, max_turns=6) is False
+
+
+async def _execute(executor, context):
+    """EventQueueSource's constructor itself needs a running event loop
+    (it schedules a background dispatcher task), so it has to be built
+    inside the same async call as execute(), not passed in from outside."""
+    await executor.execute(context, EventQueueSource())
+
+
+def test_on_task_started_fires_once_with_the_peers_name_on_a_new_task():
+    me = Robot("Robot B", "", 0, Stubborn())
+    other = Robot("Robot A", "", 0)
+    started_calls = []
+    executor = NegotiationExecutor(me, other, max_turns=6, on_task_started=started_calls.append)
+
+    opening = Message("Robot A", Intent.PROPOSE, "Robot A", "go")
+    context = FakeContext(current_task=None, message=to_a2a(opening, Role.ROLE_USER))
+
+    asyncio.run(_execute(executor, context))
+
+    assert started_calls == ["Robot A"]
+
+
+def test_on_task_started_does_not_fire_again_for_a_continuing_task():
+    me = Robot("Robot B", "", 0, Stubborn())
+    other = Robot("Robot A", "", 0)
+    started_calls = []
+    executor = NegotiationExecutor(me, other, max_turns=6, on_task_started=started_calls.append)
+
+    opening = Message("Robot A", Intent.PROPOSE, "Robot A", "go")
+    task = new_task_from_user_message(to_a2a(opening, Role.ROLE_USER))
+    newest = Message("Robot A", Intent.PROPOSE, "Robot A", "still me")
+    context = FakeContext(current_task=task, message=to_a2a(newest, Role.ROLE_USER))
+
+    asyncio.run(_execute(executor, context))
+
+    assert started_calls == []

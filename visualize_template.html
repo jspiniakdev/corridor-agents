@@ -274,6 +274,27 @@ function isInZone(position) {
   return EPISODE_DATA.grid.corridor_zone.includes(position);
 }
 
+// Phase 3 episodes (visualize.py) have a real synchronized tick - both
+// robots' actions decided and applied together each step. Phase 6+
+// networked episodes (visualize_network.py) don't - each log entry is one
+// robot's independent, serialized commit (D20), so entry.step + a real
+// elapsed_ms replace entry.tick + the fixed per-tick delay. Both shapes
+// are handled here rather than in two templates, since the rendering is
+// otherwise identical.
+const USES_STEPS = EPISODE_DATA.log.length > 0 && EPISODE_DATA.log[0].step !== undefined;
+const STEP_WORD = USES_STEPS ? "step" : "tick";
+const MIN_STEP_DELAY_MS = 300;   // even a near-instant real gap stays visible frame to frame
+const MAX_STEP_DELAY_MS = 3000;  // a long negotiation gap doesn't force a multi-second real wait
+
+function entryStep(entry) {
+  return USES_STEPS ? entry.step : entry.tick;
+}
+
+function stepDelay(entry) {
+  if (!USES_STEPS || !entry.elapsed_ms) return TICK_DELAY_MS;
+  return Math.min(Math.max(entry.elapsed_ms, MIN_STEP_DELAY_MS), MAX_STEP_DELAY_MS);
+}
+
 function buildFrames() {
   const built = [];
   let aPosition = EPISODE_DATA.robots.a.start_position;
@@ -281,7 +302,7 @@ function buildFrames() {
   let currentPriority = null;   // undecided until a log entry resolves it
 
   built.push({
-    tickLabel: "tick -",
+    tickLabel: STEP_WORD + " -",
     aPosition: aPosition,
     bPosition: bPosition,
     aAction: "",
@@ -295,8 +316,9 @@ function buildFrames() {
   });
 
   EPISODE_DATA.log.forEach(function (entry) {
+    const step = entryStep(entry);
     const isNegotiationTick =
-      EPISODE_DATA.negotiation !== null && EPISODE_DATA.negotiation.tick === entry.tick;
+      EPISODE_DATA.negotiation !== null && entryStep(EPISODE_DATA.negotiation) === step;
 
     if (isNegotiationTick) {
       const messages = EPISODE_DATA.negotiation.messages;
@@ -305,7 +327,7 @@ function buildFrames() {
       // and priority is still undecided, while the robots are still talking
       for (let shown = 1; shown <= messages.length; shown++) {
         built.push({
-          tickLabel: "tick " + entry.tick + " - negotiating",
+          tickLabel: STEP_WORD + " " + step + " - negotiating",
           aPosition: aPosition,
           bPosition: bPosition,
           aAction: "",
@@ -326,7 +348,7 @@ function buildFrames() {
         : "DEADLOCK - no agreement";
       currentPriority = entry.priority;
       built.push({
-        tickLabel: "tick " + entry.tick + " - negotiating",
+        tickLabel: STEP_WORD + " " + step + " - negotiating",
         aPosition: aPosition,
         bPosition: bPosition,
         aAction: "",
@@ -345,7 +367,7 @@ function buildFrames() {
     currentPriority = entry.priority;
 
     built.push({
-      tickLabel: "tick " + entry.tick,
+      tickLabel: STEP_WORD + " " + step,
       aPosition: aPosition,
       bPosition: bPosition,
       aAction: entry.a_action,
@@ -355,7 +377,7 @@ function buildFrames() {
       priorityText: null,
       currentPriority: currentPriority,
       verdictVisible: false,
-      delayMs: TICK_DELAY_MS,
+      delayMs: stepDelay(entry),
     });
   });
 
