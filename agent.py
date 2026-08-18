@@ -155,7 +155,7 @@ async def run_initiator(me, other, peer_url, max_turns):
             return report_outcome(me, history, max_turns), history, message_times
 
 
-async def run_initiator_webhook(me, other, peer_url, webhook_port, max_turns):
+async def run_initiator_webhook(me, other, peer_url, webhook_port, max_turns, host="0.0.0.0"):
     """Same negotiation as run_initiator, but never holds a connection open
     waiting for the responder. Registers a callback URL and sends with
     return_immediately=True, gets control back immediately, and only
@@ -185,7 +185,7 @@ async def run_initiator_webhook(me, other, peer_url, webhook_port, max_turns):
         await incoming.put(ParseDict(body, StreamResponse()))
         return {"ok": True}
 
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=webhook_port, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=webhook_port, log_level="warning"))
     server_task = asyncio.create_task(server.serve())
     while not server.started:
         await asyncio.sleep(0.05)
@@ -255,12 +255,29 @@ async def run_initiator_webhook(me, other, peer_url, webhook_port, max_turns):
         await server_task
 
 
-def build_responder_app(me, other, port, max_turns, on_resolved=None, on_task_started=None):
+def build_responder_app(me, other, port, max_turns, on_resolved=None, on_task_started=None, advertise_host="127.0.0.1"):
     """The A2A server app, always wired for push notifications - dormant
     unless a caller actually registers a callback URL (run_initiator
     never does; run_initiator_webhook does). `on_resolved`/
     `on_task_started` are threaded through to NegotiationExecutor - see
-    D17, D18."""
+    D17, D18.
+
+    advertise_host (D32) is NOT the bind address (--host, which needs to
+    be 0.0.0.0 in a container so anyone can connect in) - it's the
+    address this robot tells PEERS to use when they dial back, embedded
+    in the AgentCard's own interface.url. a2a-sdk's create_client()
+    doesn't just connect to the peer_url it's given and stop there - it
+    fetches the peer's AgentCard from that URL, then builds the actual
+    JSON-RPC transport from the CARD's own self-reported url (confirmed
+    by reading ClientFactory.create_from_url/create directly, not
+    assumed). Left hardcoded to "127.0.0.1" for a long time since it
+    never mattered locally (that's genuinely how a local peer reaches
+    this process) - surfaced as a real bug the first time this ran
+    across separate containers (D32/Phase 7): robot-a would fetch
+    robot-b's card fine, then try to connect back to "127.0.0.1", which
+    inside robot-a's own container just points at itself, and dial
+    forever, "all connection attempts failed", burning an LLM call every
+    retry."""
     import httpx
     from a2a.server.request_handlers import DefaultRequestHandler
     from a2a.server.routes import add_a2a_routes_to_fastapi, create_agent_card_routes, create_jsonrpc_routes
@@ -280,7 +297,7 @@ def build_responder_app(me, other, port, max_turns, on_resolved=None, on_task_st
         version="0.0.1",
         capabilities=AgentCapabilities(streaming=True, push_notifications=True),
         supported_interfaces=[
-            AgentInterface(protocol_binding="JSONRPC", url=f"http://127.0.0.1:{port}", protocol_version="1.0")
+            AgentInterface(protocol_binding="JSONRPC", url=f"http://{advertise_host}:{port}", protocol_version="1.0")
         ],
         skills=[skill],
     )
@@ -304,18 +321,20 @@ def build_responder_app(me, other, port, max_turns, on_resolved=None, on_task_st
     return app
 
 
-def run_responder(me, other, port, max_turns):
+def run_responder(me, other, port, max_turns, host="0.0.0.0", advertise_host="127.0.0.1"):
     """The --side b server on its own: always listening, reacting to
     whatever the initiator sends. See run_responder_async for the
     concurrent-with-a-movement-loop version (--world-url)."""
     import uvicorn
 
-    app = build_responder_app(me, other, port, max_turns)
-    print(f"{me.name} listening on http://127.0.0.1:{port}")
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    app = build_responder_app(me, other, port, max_turns, advertise_host=advertise_host)
+    print(f"{me.name} listening on http://{host}:{port}")
+    uvicorn.run(app, host=host, port=port)
 
 
-async def run_responder_async(me, other, port, max_turns, on_resolved=None, on_task_started=None):
+async def run_responder_async(
+    me, other, port, max_turns, on_resolved=None, on_task_started=None, host="0.0.0.0", advertise_host="127.0.0.1"
+):
     """Same server, started as a background task instead of blocking the
     thread - so a movement loop can run alongside it. Returns the
     (server, task) pair; caller is responsible for server.should_exit +
@@ -323,12 +342,14 @@ async def run_responder_async(me, other, port, max_turns, on_resolved=None, on_t
     for its own webhook receiver."""
     import uvicorn
 
-    app = build_responder_app(me, other, port, max_turns, on_resolved=on_resolved, on_task_started=on_task_started)
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    app = build_responder_app(
+        me, other, port, max_turns, on_resolved=on_resolved, on_task_started=on_task_started, advertise_host=advertise_host
+    )
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning"))
     task = asyncio.create_task(server.serve())
     while not server.started:
         await asyncio.sleep(0.05)
-    print(f"{me.name} listening on http://127.0.0.1:{port}")
+    print(f"{me.name} listening on http://{host}:{port}")
     return server, task
 
 
@@ -411,7 +432,19 @@ def write_negotiation_trace(history, message_times, comms_established_at, resolv
 ROBOT_STATUS_PATH_TEMPLATE = "experiments/results/robot_status_{side}.jsonl"
 
 
-async def run_robot(me, other, side, port, peer_url, world_url, max_turns, webhook_port=None, debug_log=False):
+async def run_robot(
+    me,
+    other,
+    side,
+    port,
+    peer_url,
+    world_url,
+    max_turns,
+    webhook_port=None,
+    debug_log=False,
+    host="0.0.0.0",
+    advertise_host="127.0.0.1",
+):
     """--world-url, dynamic initiation (D18): every robot always runs its
     own A2A server AND its own movement loop AND is capable of dialing
     the peer - the fixed --side a/--side b role split from Phase 6 is
@@ -512,7 +545,14 @@ async def run_robot(me, other, side, port, peer_url, world_url, max_turns, webho
             dial_task.cancel()
 
     server, server_task = await run_responder_async(
-        me, other, port, max_turns, on_resolved=on_resolved, on_task_started=on_task_started
+        me,
+        other,
+        port,
+        max_turns,
+        on_resolved=on_resolved,
+        on_task_started=on_task_started,
+        host=host,
+        advertise_host=advertise_host,
     )
 
     try:
@@ -582,6 +622,16 @@ def main():
         action="store_true",
         help="D29: write experiments/results/robot_status_<side>.jsonl, a real-time log of this robot's own decision points, for export_timeline_csv.py. Off by default - only turn on when actually debugging.",
     )
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Phase 7: 0.0.0.0 (not 127.0.0.1) so other containers on the same Compose network can reach this one - still reachable via localhost for plain local runs too.",
+    )
+    parser.add_argument(
+        "--advertise-host",
+        default="127.0.0.1",
+        help="Phase 7/D32: the address embedded in THIS robot's own AgentCard for peers to dial back to - not the bind address (--host). In Compose, set this to the service name (e.g. robot-a) so a2a-sdk's create_client(), which connects using the peer's self-reported card URL rather than the peer_url string alone, doesn't try to reach back through 127.0.0.1 from inside another container.",
+    )
     args = parser.parse_args()
 
     me, other = build_robots(args.side, args.scenario, args.policy)
@@ -591,7 +641,17 @@ def main():
         webhook_port = args.webhook_port if args.webhook else None
         asyncio.run(
             run_robot(
-                me, other, args.side, args.port, args.peer_url, args.world_url, args.max_turns, webhook_port, args.debug_log
+                me,
+                other,
+                args.side,
+                args.port,
+                args.peer_url,
+                args.world_url,
+                args.max_turns,
+                webhook_port,
+                args.debug_log,
+                args.host,
+                args.advertise_host,
             )
         )
         return 0
@@ -599,11 +659,11 @@ def main():
     if args.side == "a":
         print(f"{me.name} ({args.policy}) initiating {args.scenario} against {args.peer_url}")
         if args.webhook:
-            asyncio.run(run_initiator_webhook(me, other, args.peer_url, args.webhook_port, args.max_turns))
+            asyncio.run(run_initiator_webhook(me, other, args.peer_url, args.webhook_port, args.max_turns, host=args.host))
         else:
             asyncio.run(run_initiator(me, other, args.peer_url, args.max_turns))
     else:
-        run_responder(me, other, args.port, args.max_turns)
+        run_responder(me, other, args.port, args.max_turns, host=args.host, advertise_host=args.advertise_host)
     return 0
 
 

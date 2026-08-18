@@ -182,10 +182,15 @@ def get_log() -> dict:
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", type=int, default=9500)
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Phase 7: 0.0.0.0 (not 127.0.0.1) so other containers on the same Compose network can reach this one - still reachable via localhost for plain local runs too.",
+    )
     args = parser.parse_args()
 
-    print(f"world server listening on http://127.0.0.1:{args.port}")
-    mcp.run(transport="streamable-http", host="127.0.0.1", port=args.port, stateless_http=True)
+    print(f"world server listening on http://{args.host}:{args.port}")
+    mcp.run(transport="streamable-http", host=args.host, port=args.port, stateless_http=True)
 
 
 if __name__ == "__main__":

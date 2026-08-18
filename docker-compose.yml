@@ -1,0 +1,63 @@
+# Phase 7: the same fleet the venv-based "three terminals" run command
+# starts (world_server.py, agent.py --side a, agent.py --side b), each in
+# its own container - matching what Phase 8's Cloud Run deployment will
+# look like. See docs/PLAN.md §5, docs/DECISIONS.md D32.
+#
+# Run:
+#   source .env                # ANTHROPIC_API_KEY, for the default --policy llm
+#   docker compose up --build
+#
+# ANTHROPIC_API_KEY comes from ${ANTHROPIC_API_KEY} (the calling shell's
+# own environment, via `source .env`), not env_file - .env.example uses
+# `export VAR=...` shell syntax (so `source .env` also works for the
+# plain venv workflow), which Compose's env_file parser doesn't
+# understand and would misparse as a garbled key name.
+#
+# world gets a real healthcheck (a plain TCP connect, stdlib only - no
+# curl in python:3.13-slim) so robot-a/robot-b don't start dialing before
+# it's actually listening - agent.py's own MCP client has no retry
+# around its *first* connection attempt, so a naive `depends_on` without
+# this would let a real startup race crash a robot container.
+
+services:
+  world:
+    build: .
+    command: python world_server.py --port 9500 --host 0.0.0.0
+    ports:
+      - "9500:9500"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 9500), timeout=2)"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+
+  robot-a:
+    build: .
+    command: >
+      python agent.py --scenario routine_vs_medical --policy llm
+      --side a --port 9001 --host 0.0.0.0 --advertise-host robot-a
+      --peer-url http://robot-b:9002
+      --world-url http://world:9500/mcp
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    depends_on:
+      world:
+        condition: service_healthy
+    volumes:
+      - ./experiments:/app/experiments
+
+  robot-b:
+    build: .
+    command: >
+      python agent.py --scenario routine_vs_medical --policy llm
+      --side b --port 9002 --host 0.0.0.0 --advertise-host robot-b
+      --peer-url http://robot-a:9001
+      --world-url http://world:9500/mcp
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    depends_on:
+      world:
+        condition: service_healthy
+    volumes:
+      - ./experiments:/app/experiments

@@ -1397,3 +1397,74 @@ times, via `export_timeline_csv.py`'s output.
 simultaneous launch (e.g. a wrapper script that starts both processes
 from the same parent at once) - worth building if this head start ever
 matters for something more than readability, but not needed today.
+
+## D32 — Phase 7: containers
+
+**Decided:** one shared `Dockerfile` (Python 3.13, `requirements.txt`,
+the whole repo copied in) - the same image runs all three fleet members,
+`docker-compose.yml` just picks the command per service. Three services:
+`world` (`world_server.py`), `robot-a`, `robot-b` (`agent.py --side a`/
+`--side b`), on Compose's default network with built-in service-name
+DNS. `robot-a`/`robot-b` mount `./experiments:/app/experiments`, so
+`negotiation_trace.json` and (with `--debug-log`) the robot-status logs
+land on the host - `visualize_network.py`/`export_timeline_csv.py`
+deliberately stay outside any container (dev/debug tools, not fleet
+agents) and read the mounted output afterward, same as they already do
+against a plain venv run. `docker-compose up` defaults to
+`--policy llm --scenario routine_vs_medical` (the project's own go-to
+demo case) - needs `source .env` first, same habit the venv workflow
+already requires.
+
+**Two real bugs found and fixed along the way, not assumed away:**
+
+1. `world_server.py`/`agent.py` bound their servers to `host="127.0.0.1"`
+   - loopback-only, unreachable from another container's network
+   namespace. Both gained a `--host` flag, default `0.0.0.0` (still
+   reachable via localhost for plain local runs - verified live, zero
+   behavior change). Non-negotiable for containers to work at all, not a
+   judgment call.
+2. A much subtler one, only found by actually running the containers
+   together, not by code review alone: every dial failed forever
+   (`All connection attempts failed`, retried indefinitely, burning an
+   LLM call each time) even though both robots could reach `world` fine.
+   Traced directly into `a2a-sdk`'s source
+   (`ClientFactory.create_from_url`/`.create`) to confirm the actual
+   mechanism: `create_client(peer_url)` fetches the peer's AgentCard from
+   `peer_url`, but then builds the real JSON-RPC transport from the
+   *card's own* `supported_interfaces[i].url` - not from `peer_url`
+   itself. `build_responder_app` had always hardcoded that field to
+   `"127.0.0.1"`, harmless on a single machine (that genuinely was how a
+   local peer reached it) but fatal across containers - robot-a would
+   fetch robot-b's card fine, then try to dial back through
+   `127.0.0.1`, which inside robot-a's own container just points at
+   itself. Fixed with a second, distinct flag - `--advertise-host`
+   (default `127.0.0.1`, unchanged for local runs) - kept deliberately
+   separate from `--host`: one is "what do I bind to," the other is
+   "what address do I tell peers to use," and conflating them would have
+   been wrong in both directions (`0.0.0.0` isn't dialable, `127.0.0.1`
+   isn't reachable cross-container). Compose passes
+   `--advertise-host robot-a`/`robot-b` explicitly.
+
+**Why the second bug matters beyond just fixing it:** this had been a
+live, latent bug since Phase 5 (D15) - just never observable, because
+every negotiation until now ran on one machine, where `127.0.0.1` always
+happened to be correct by coincidence. Containers didn't introduce the
+bug; they were the first environment honest enough to expose it.
+
+**Verified live, end-to-end, real containers (not simulated):** `docker
+compose build` (all three images), `docker compose up` with real
+Anthropic API calls - both robots negotiated correctly (`Robot B` wins,
+matching ground truth), both exited cleanly (code 0), `world` stayed up
+and reported healthy. Confirmed the volume mount by reading
+`negotiation_trace.json` back from the host filesystem afterward, then
+ran `visualize_network.py` and `export_timeline_csv.py` *locally*
+(outside any container) against the still-running `world` container's
+published port (`9500:9500`) and got correct output both times - the
+full intended workflow (containerized fleet, host-side debug tooling)
+confirmed working together, not just each half in isolation. Full test
+suite (102) unaffected throughout.
+
+**Would change our mind:** if Phase 9's multi-robot discovery (Pub/Sub)
+makes per-robot self-advertised addressing obsolete - `--advertise-host`
+would likely get replaced by whatever that phase's discovery mechanism
+provides, not layered on top of it.

@@ -147,7 +147,30 @@ debug without going through `visualize_network.py`'s rendered replay at
 all, after D22/D25/D28 all turned out to be replay-rendering artifacts,
 not real bugs.
 
-**Next: Phase 7 — containers** (Docker + Compose). See `PLAN.md` §5.
+**Phase 7 complete: containers (D32).** One shared `Dockerfile`, one
+`docker-compose.yml` with three services (`world`, `robot-a`, `robot-b`)
+on Compose's default network - `docker compose up` (after `source .env`)
+runs the exact same `routine_vs_medical`/`llm` episode the venv-based
+three-terminal command does. `visualize_network.py`/`export_timeline_csv.py`
+deliberately stay outside any container - dev/debug tools, not fleet
+agents - and read the mounted `./experiments` volume afterward. Two real
+bugs found only by actually running containers together, not by review
+alone: `world_server.py`/`agent.py` needed `--host 0.0.0.0` to bind
+reachably at all (both default to it now, still fine for plain local
+runs); and a much subtler one - `a2a-sdk`'s `create_client()` builds its
+real connection from the *peer's own self-reported AgentCard URL*, not
+the `peer_url` string passed to it, so `agent.py`'s AgentCard had always
+hardcoded `127.0.0.1` there - harmless on one machine (that genuinely was
+correct), fatal across containers. New `--advertise-host` flag (default
+`127.0.0.1`, set to the Compose service name in `docker-compose.yml`)
+fixes it - kept deliberately separate from `--host`, since `0.0.0.0`
+isn't dialable and `127.0.0.1` isn't reachable cross-container; neither
+value works for both jobs. Verified live end-to-end with real containers
+and real Anthropic API calls - correct outcome, clean exit, volume mount
+confirmed, host-side debug tools confirmed working against the
+still-running `world` container afterward.
+
+**Next: Phase 8 — deploy** (Cloud Run, Secret Manager, Vertex AI). See `PLAN.md` §5.
 
 ## How to run things
 
@@ -199,6 +222,19 @@ python export_timeline_csv.py --world-url http://127.0.0.1:9500/mcp
 # project's go-to demo case) - a bare `python agent.py --side a --port ...`
 # now makes real Anthropic API calls and needs .env sourced; pass
 # --policy stubborn explicitly for a free/deterministic smoke test.
+
+# Phase 7 (D32): the same fleet, containerized - one command instead of
+# three terminals. Needs Docker Desktop (or another local Docker engine)
+# running first.
+source .env                       # ANTHROPIC_API_KEY, for the default --policy llm
+docker compose up --build
+
+# after it finishes, world's container is still up (only the robots exit
+# once they reach target) - the same local debug tools work against it
+# unchanged, reading experiments/ via the mounted volume:
+python visualize_network.py --world-url http://127.0.0.1:9500/mcp
+python export_timeline_csv.py --world-url http://127.0.0.1:9500/mcp
+docker compose down               # when actually done
 ```
 
 ## The one design principle

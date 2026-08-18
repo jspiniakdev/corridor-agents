@@ -12,6 +12,7 @@ The setup this project was built on, and how to recreate it.
 | GitHub | **HTTPS** via `gh` credential helper | `gh auth login` chose HTTPS, so no SSH key is needed. `git push` just works. |
 | GitHub account | `jspiniakdev` | Where the private repo lives. |
 | Editor | VS Code | Interpreter must be set to `.venv` (Cmd+Shift+P → *Python: Select Interpreter*). |
+| Docker | **Docker Desktop**, via `brew install --cask docker` | Phase 7 (D32) - Compose runs the fleet. `docker`/`docker compose` need Docker Desktop actually launched (the whale icon in the menu bar) before either command works, not just installed. |
 | Assistant | Claude Code (`~/.local/bin/claude`) | Requires `~/.local/bin` on PATH. |
 
 ## Recreate it
@@ -47,3 +48,10 @@ python run.py --a llm --b llm
   embeds the quote characters in every commit. Set config values by typing in
   the terminal, not by pasting from an editor that auto-converts quotes.
 - `claude` installs to `~/.local/bin`, which is not on PATH by default on macOS.
+- `brew install --cask docker` needs an interactive terminal - it hits a
+  `sudo` prompt (to symlink the `docker-compose` CLI plugin) partway through,
+  and fails/rolls back entirely if run somewhere that can't prompt for a
+  password. Run it directly in a real terminal, not from a non-interactive
+  context. Docker Desktop also needs to actually be launched once
+  (`open -a Docker`, approve the one-time permission dialog) before
+  `docker`/`docker compose` work at all - installed isn't the same as running.
