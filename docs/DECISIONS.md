@@ -344,3 +344,53 @@ build step, or a JS framework to stay useful - at that point it would
 actually be the thing §7 deferred, and should wait for whatever phase
 Cloud Run/A2A get established, rather than becoming a second, ungoverned
 infra track.
+
+---
+
+## D14 — Phase 4: a dumb message board, not a referee that drives negotiation
+
+**Decided:** `comms_server.py` is a stateless, negotiation-unaware append-only
+message board (`GET`/`POST /messages`) — it doesn't know what a turn is or
+when an agreement happened. Each robot runs as its own process (`agent.py`)
+that polls the board and independently computes its own turn from
+`len(history) % 2` (the same alternation `negotiate()` already used), checks
+`check_agreement()` itself, and speaks using its own local, real policy. No
+third party ever makes a negotiation decision.
+
+**Rejected:** the first design that was actually built partway through
+planning - a `RemotePolicy` wrapping an HTTP call, plus a `run_networked.py`
+driver script that called both robots' endpoints in turn, held the canonical
+conversation, and decided when they'd agreed.
+
+**Why:** working through that design conversationally surfaced that the
+external driver was a central coordinator wearing a disguise - the exact
+thing D4b already named for the world channel, just recreated on the
+negotiation channel instead. If these were real robots, nothing would play
+that role; each robot has to decide its own turn and its own agreement
+independently. The fix that makes independent polling safe with zero
+coordination machinery: since a message gets appended to the shared history
+on every turn, `len(history)` at any moment tells both robots whose turn is
+next (even → A, odd → B) - no locks, no race conditions, nothing to
+coordinate, because both robots compute the same number from the same shared
+state.
+
+**One small, honest exception to "zero diff to negotiation.py":** each
+robot's loop needs to call the agreement check directly, since there's no
+external driver left to alternate turns and call it centrally. That function
+existed as `_check_agreement` - a leading-underscore "internal" name, at the
+time only called inside `negotiate()` and imported directly by one test.
+Once real runtime code (`agent.py`) depends on it too, the underscore was
+actively misleading, so it was renamed to `check_agreement`. One-line rename
+plus its one call site and one test import; behavior unchanged.
+
+**Consequence:** `RemotePolicy` and the passive `agent_server.py` design
+never shipped - `agent.py` calls `me.policy.respond(...)` directly, the same
+as every in-process script. `negotiate()` itself is untouched and still
+drives every in-process script (`run.py`, `eval.py`, `simulate.py`,
+`world_eval.py`) unchanged; the networked case reuses its smaller building
+blocks (`check_agreement`) directly instead of being driven by it.
+
+**Would change our mind:** if a future phase needs a real handshake before
+negotiation starts (agreeing on which scenario, confirming both sides are
+up) - that's explicitly deferred to Phase 5's A2A agent cards, not something
+to bolt onto this dumb board.

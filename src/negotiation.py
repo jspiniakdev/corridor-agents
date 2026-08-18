@@ -267,7 +267,7 @@ class Outcome:
         return len(self.history)
 
 
-def _check_agreement(history: list[Message]) -> str | None:
+def check_agreement(history: list[Message]) -> str | None:
     """Agreement = an ACCEPT that matches the standing proposal it answers."""
     if not history:
         return None
@@ -286,7 +286,7 @@ def negotiate(a: Robot, b: Robot, max_turns: int = 6) -> Outcome:
     for turn in range(max_turns):
         speaker, other = (a, b) if turn % 2 == 0 else (b, a)
         history.append(speaker.policy.respond(speaker, other, history, max_turns))
-        agreed = _check_agreement(history)
+        agreed = check_agreement(history)
         if agreed:
             return Outcome(history, agreed)
     return Outcome(history, None)

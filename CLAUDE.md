@@ -23,14 +23,22 @@ other arrives - everything else resolves for free with zero LLM calls.
 `world_eval.py`/`experiments/world_cases.csv` batch-measure grid episodes,
 alongside `eval.py`/`experiments/cases.csv` (Phase 2) for plain negotiations.
 
-**Next: Phase 4 — split into separate processes.** Each agent becomes its own
-HTTP service, with homemade messaging. See `PLAN.md` §5.
+**Phase 4 complete.** Each robot runs as its own process (`agent.py`),
+negotiating over a deliberately dumb message board (`comms_server.py`) that
+has zero awareness of turns, agreement, or content — see D14. No central
+party ever makes a negotiation decision; each robot polls the shared history
+and independently computes its own turn (`len(history) % 2`) and checks
+agreement itself, using the same `negotiate()` building blocks unchanged.
+
+**Next: Phase 5 — A2A.** Replace the homemade HTTP board with the real
+protocol: agent cards, task lifecycle, push notifications. See `PLAN.md` §5,
+D2.
 
 ## How to run things
 
 ```bash
 source .venv/bin/activate        # Python 3.13; required in each new shell
-python -m pytest tests/ -q       # 54 tests, no API calls, ~0.05s
+python -m pytest tests/ -q       # 67 tests, no API calls, ~0.03s
 python run.py                    # one negotiation, deterministic policies
 python run.py --a llm --b llm    # needs: cp .env.example .env && source .env
 python eval.py                   # measurement sweep, deterministic cases only
@@ -40,6 +48,11 @@ python simulate.py --no-deliberate --a llm --b llm  # FCFS baseline vs. negotiat
 python world_eval.py             # grid-episode measurement sweep, free cases only
 python world_eval.py --full      # also runs the deliberate llm-involving cases
 python visualize.py              # tick-by-tick HTML replay of one episode
+
+# Phase 4: three terminals, same --scenario in each (nothing checks that for you)
+python comms_server.py --port 8000
+python agent.py --scenario <id> --side a --policy stubborn --comms-url http://localhost:8000
+python agent.py --scenario <id> --side b --policy always_yield --comms-url http://localhost:8000
 ```
 
 ## The one design principle

@@ -77,13 +77,13 @@ def test_agreement_stops_the_exchange_early():
 
 def test_accept_must_match_the_proposal():
     """A mismatched ACCEPT is not agreement - both must name the same robot."""
-    from negotiation import _check_agreement
+    from negotiation import check_agreement
 
     history = [
         Message("Robot A", Intent.PROPOSE, "Robot A"),
         Message("Robot B", Intent.ACCEPT, "Robot B"),  # accepts, but names the wrong robot
     ]
-    assert _check_agreement(history) is None
+    assert check_agreement(history) is None
 
 
 def test_ground_truth_is_never_shown_to_a_policy():
