@@ -24,7 +24,6 @@ means "client-only" vs "server-only".
 
 import argparse
 import asyncio
-import random
 import sys
 import time
 
@@ -37,7 +36,7 @@ from wire import history_to_list, message_from_dict, message_to_dict  # noqa: E4
 
 from agent_executor import NegotiationExecutor  # noqa: E402
 
-JITTER_SECONDS = 1.0
+POLL_INTERVAL_SECONDS = 1.0  # D30: how often a robot checks in with the world - governs movement, waiting, and negotiation-trigger cadence uniformly, not a separate "how long does moving take" model. Slept BEFORE each check-in (top of run_robot()'s loop), not after - so the first check-in is paced too, not a free instant action exempt from the interval.
 
 
 def build_robots(side, scenario_id, policy_name):
@@ -95,24 +94,31 @@ async def run_initiator(me, other, peer_url, max_turns):
     responder's TaskUpdater published, and keep going until the task
     reaches a terminal state. Holds the connection open the whole time -
     see run_initiator_webhook for the alternative that doesn't. Returns
-    (outcome, history) - D19 needs the full transcript, not just the
-    outcome, to write a trace file."""
+    (outcome, history, message_times) - D19 needs the full transcript, not
+    just the outcome, to write a trace file; message_times (D29) is a
+    real time.time() per entry in history, parallel by index, cheap to
+    capture (one call already in flight per message) and always included
+    - unlike the debug-flagged robot-status log, this doesn't cost an
+    extra file write, just one more field on the trace file already
+    written every run."""
     from a2a.client import create_client
     from a2a.helpers import get_data_parts, new_data_message
     from a2a.types.a2a_pb2 import Role, SendMessageRequest, TaskState
 
     client = await create_client(peer_url)
     history = []
+    message_times = []
     task_id = None
     context_id = None
 
     while True:
         if check_agreement(history) is not None or len(history) >= max_turns:
-            return report_outcome(me, history, max_turns), history
+            return report_outcome(me, history, max_turns), history, message_times
 
         my_message = me.policy.respond(me, other, history, max_turns)
         print(f"  {my_message}")
         history.append(my_message)
+        message_times.append(time.time())
 
         a2a_message = new_data_message(
             message_to_dict(my_message),
@@ -143,9 +149,10 @@ async def run_initiator(me, other, peer_url, max_turns):
             peer_reply = message_from_dict(get_data_parts(peer_reply_parts)[0])
             print(f"  {peer_reply}")
             history.append(peer_reply)
+            message_times.append(time.time())
 
         if final_state == TaskState.TASK_STATE_COMPLETED:
-            return report_outcome(me, history, max_turns), history
+            return report_outcome(me, history, max_turns), history, message_times
 
 
 async def run_initiator_webhook(me, other, peer_url, webhook_port, max_turns):
@@ -187,17 +194,19 @@ async def run_initiator_webhook(me, other, peer_url, webhook_port, max_turns):
 
     client = await create_client(peer_url)
     history = []
+    message_times = []
     task_id = None
     context_id = None
 
     try:
         while True:
             if check_agreement(history) is not None or len(history) >= max_turns:
-                return report_outcome(me, history, max_turns), history
+                return report_outcome(me, history, max_turns), history, message_times
 
             my_message = me.policy.respond(me, other, history, max_turns)
             print(f"  {my_message}")
             history.append(my_message)
+            message_times.append(time.time())
 
             a2a_message = new_data_message(
                 message_to_dict(my_message), role=Role.ROLE_USER, task_id=task_id, context_id=context_id
@@ -237,9 +246,10 @@ async def run_initiator_webhook(me, other, peer_url, webhook_port, max_turns):
                 peer_reply = message_from_dict(get_data_parts(peer_reply_parts)[0])
                 print(f"  {peer_reply}")
                 history.append(peer_reply)
+                message_times.append(time.time())
 
             if final_state == TaskState.TASK_STATE_COMPLETED:
-                return report_outcome(me, history, max_turns), history
+                return report_outcome(me, history, max_turns), history, message_times
     finally:
         server.should_exit = True
         await server_task
@@ -347,24 +357,6 @@ def decide_movement(obs, priority, my_name, other_name):
     return "wait"  # priority not yet known - hold at the boundary
 
 
-RACE_PLAUSIBLE_DISTANCE = 5  # steps
-
-
-def should_skip_jitter(obs):
-    """D23: jitter exists to reduce the chance of a genuine simultaneous
-    dial - but that risk only exists if the other robot is anywhere close
-    to also reaching its own trigger condition. Sensing the other robot
-    at all doesn't mean that - it might be sensed from a long way off
-    (D21's asymmetric grid makes this common). If it's farther than
-    RACE_PLAUSIBLE_DISTANCE from its OWN boundary, there's no realistic
-    chance it independently dials in the next moment, so waiting out a
-    jitter delay protects against nothing. A heuristic, not a safety
-    guarantee - if it's ever wrong, the static tiebreak + incoming_active
-    guard (D18) still correctly resolve any actual race regardless."""
-    distance = obs.get("other_distance_to_boundary")
-    return distance is not None and distance > RACE_PLAUSIBLE_DISTANCE
-
-
 async def negotiate_as_initiator(me, other, peer_url, max_turns, webhook_port):
     if webhook_port:
         return await run_initiator_webhook(me, other, peer_url, webhook_port, max_turns)
@@ -374,7 +366,7 @@ async def negotiate_as_initiator(me, other, peer_url, max_turns, webhook_port):
 NEGOTIATION_TRACE_PATH = "experiments/results/negotiation_trace.json"
 
 
-def write_negotiation_trace(history, comms_established_at, resolved_at):
+def write_negotiation_trace(history, message_times, comms_established_at, resolved_at):
     """Whichever robot ends up holding the full transcript - either side,
     now that initiation is dynamic (D18) - writes it out once the
     negotiation concludes, so visualize_network.py can render it
@@ -389,15 +381,24 @@ def write_negotiation_trace(history, comms_established_at, resolved_at):
     boundary-crossing), which broke badly once the grid became
     asymmetric (D21) and a negotiation's real winner could be arbitrarily
     far from crossing its own boundary for a long time after the
-    negotiation had already concluded."""
+    negotiation had already concluded.
+
+    message_times (D29) is a real time.time() per entry in history,
+    parallel by index - each message's own moment, not just the
+    exchange's start/end - for tools (export_timeline_csv.py) that want
+    to place individual messages on a shared real-time timeline with the
+    world log, not just the negotiation as one block."""
     import json
     import os
 
     os.makedirs(os.path.dirname(NEGOTIATION_TRACE_PATH), exist_ok=True)
+    messages = history_to_list(history)
+    for message, sent_at in zip(messages, message_times):
+        message["timestamp"] = sent_at
     with open(NEGOTIATION_TRACE_PATH, "w") as f:
         json.dump(
             {
-                "messages": history_to_list(history),
+                "messages": messages,
                 "comms_established_at": comms_established_at,
                 "resolved_at": resolved_at,
             },
@@ -407,7 +408,10 @@ def write_negotiation_trace(history, comms_established_at, resolved_at):
     print(f"wrote {NEGOTIATION_TRACE_PATH}")
 
 
-async def run_robot(me, other, side, port, peer_url, world_url, max_turns, webhook_port=None):
+ROBOT_STATUS_PATH_TEMPLATE = "experiments/results/robot_status_{side}.jsonl"
+
+
+async def run_robot(me, other, side, port, peer_url, world_url, max_turns, webhook_port=None, debug_log=False):
     """--world-url, dynamic initiation (D18): every robot always runs its
     own A2A server AND its own movement loop AND is capable of dialing
     the peer - the fixed --side a/--side b role split from Phase 6 is
@@ -416,14 +420,20 @@ async def run_robot(me, other, side, port, peer_url, world_url, max_turns, webho
     physical logic, unchanged) - arriving alone still claims priority for
     free, zero negotiation.
 
-    The dial itself is jittered (a random delay before dialing, not
-    inline - the loop keeps polling/proposing while it waits) and run as
-    a cancellable background task. Three race scenarios, all handled -
-    see D18, D27:
+    The dial itself is run as a cancellable background task (not inline -
+    the loop keeps polling/proposing while a dial is in flight). Dialing
+    used to be jittered - a random delay meant to reduce how often both
+    sides dial at once - removed in D30: it wasn't a correctness
+    mechanism (races were always resolved safely regardless, see below),
+    and it added real complexity for a benefit that shrank to nothing
+    once the poll interval widened (a jitter window narrower than the
+    poll interval can't actually spread anything - both sides still act
+    on their very next poll regardless of the random draw). Three race
+    scenarios, all handled - see D18, D27:
     1. An incoming task starts while this robot is ALREADY mid-dial ->
        on_task_started cancels the losing side's outbound attempt.
     2. An incoming task is already active (started, not yet resolved)
-       when this robot's own jitter deadline would otherwise fire -
+       when this robot's own next poll would otherwise decide to dial -
        incoming_active blocks a *second*, redundant dial from ever
        starting in the first place. Caught live: without this, a slow
        LLM negotiation left enough of a window for the responding side's
@@ -447,32 +457,58 @@ async def run_robot(me, other, side, port, peer_url, world_url, max_turns, webho
     static private text. Without this, a networked LLM negotiated
     completely blind to position and distance - a real gap since Phase 5,
     only caught by a user noticing the model reasoning as if it had no
-    idea where the other robot actually was."""
+    idea where the other robot actually was.
+
+    debug_log (D29, off by default) writes every real decision point
+    below - the same moments already printed to stdout, structured - to
+    ROBOT_STATUS_PATH_TEMPLATE.format(side=side), for export_timeline_csv.py
+    to merge with the world log and negotiation trace on one real
+    timeline. Off by default: a normal run doesn't need this file and
+    shouldn't pay for it - requested directly, to avoid instrumenting
+    every run just to occasionally debug one."""
     from mcp.client import Client
 
     priority_holder = {"value": None}
     dial_holder = {"task": None}
-    jitter_deadline = {"value": None}
     incoming_active = {"value": False}
     comms_established_at = {"value": None}
     private_situation = me.situation
 
-    def on_resolved(outcome, history):
+    status_log_path = ROBOT_STATUS_PATH_TEMPLATE.format(side=side) if debug_log else None
+    if status_log_path:
+        import os
+
+        os.makedirs(os.path.dirname(status_log_path), exist_ok=True)
+        open(status_log_path, "w").close()  # truncate - one file per run, not appended across runs
+
+    def log_status(detail):
+        if status_log_path is None:
+            return
+        import json
+
+        with open(status_log_path, "a") as f:
+            f.write(json.dumps({"timestamp": time.time(), "side": side, "detail": detail}) + "\n")
+
+    def on_resolved(outcome, history, message_times):
         priority_holder["value"] = outcome
         incoming_active["value"] = False
         print(f"{me.name}: negotiated outcome (incoming task): {outcome}")
-        write_negotiation_trace(history, comms_established_at["value"], time.time())
+        log_status(f"negotiated outcome (incoming task): {outcome}")
+        write_negotiation_trace(history, message_times, comms_established_at["value"], time.time())
         dial_task = dial_holder["task"]
         if dial_task is not None and not dial_task.done():
             print(f"{me.name}: outcome already known from an incoming call - cancelling my own outbound dial")
+            log_status("cancelling my own outbound dial - outcome already known from an incoming call")
             dial_task.cancel()
 
     def on_task_started(peer_name):
         comms_established_at["value"] = time.time()
         incoming_active["value"] = True
+        log_status(f"incoming task started from {peer_name}")
         dial_task = dial_holder["task"]
         if dial_task is not None and not dial_task.done() and not is_my_turn_to_initiate(me.name, peer_name):
             print(f"{me.name}: race - {peer_name} called in while I was dialing - deferring")
+            log_status(f"race - {peer_name} called in while dialing - deferring")
             dial_task.cancel()
 
     server, server_task = await run_responder_async(
@@ -482,31 +518,26 @@ async def run_robot(me, other, side, port, peer_url, world_url, max_turns, webho
     try:
         async with Client(world_url) as world:
             while True:
+                await asyncio.sleep(POLL_INTERVAL_SECONDS)
                 obs = await mcp_call(world, "get_observation", side=side)
                 me.situation = compose_observation_from_dict(obs, other.name, private_situation)
                 if obs["reached_target"]:
                     print(f"{me.name}: reached target")
+                    log_status("reached target")
                     return
 
                 if priority_holder["value"] is None and obs["at_boundary"]:
                     if not obs["sensed_other"]:
                         priority_holder["value"] = me.name
                         print(f"{me.name}: at boundary alone - claiming priority")
+                        log_status("at boundary alone - claiming priority")
                     elif dial_holder["task"] is None and not incoming_active["value"]:
-                        if should_skip_jitter(obs):
-                            print(f"{me.name}: at boundary, sensing {other.name} but it's far from its own boundary - dialing immediately, no jitter")
-                            comms_established_at["value"] = time.time()
-                            dial_holder["task"] = asyncio.create_task(
-                                negotiate_as_initiator(me, other, peer_url, max_turns, webhook_port)
-                            )
-                        elif jitter_deadline["value"] is None:
-                            jitter_deadline["value"] = time.monotonic() + random.uniform(0, JITTER_SECONDS)
-                        elif time.monotonic() >= jitter_deadline["value"]:
-                            print(f"{me.name}: at boundary, sensing {other.name} - dialing")
-                            comms_established_at["value"] = time.time()
-                            dial_holder["task"] = asyncio.create_task(
-                                negotiate_as_initiator(me, other, peer_url, max_turns, webhook_port)
-                            )
+                        print(f"{me.name}: at boundary, sensing {other.name} - dialing")
+                        log_status(f"at boundary, sensing {other.name} - dialing")
+                        comms_established_at["value"] = time.time()
+                        dial_holder["task"] = asyncio.create_task(
+                            negotiate_as_initiator(me, other, peer_url, max_turns, webhook_port)
+                        )
 
                 dial_task = dial_holder["task"]
                 if dial_task is not None and dial_task.done():
@@ -515,17 +546,17 @@ async def run_robot(me, other, side, port, peer_url, world_url, max_turns, webho
                         if error is not None:
                             # a real robot doesn't die because it called a
                             # peer a moment too early - log it and let a
-                            # fresh dial get scheduled on a later iteration
+                            # fresh dial get scheduled on the next poll
                             print(f"{me.name}: dial failed ({error}) - will retry")
-                            jitter_deadline["value"] = None
+                            log_status(f"dial failed ({error}) - will retry")
                         else:
-                            priority_holder["value"], dial_history = dial_task.result()
-                            write_negotiation_trace(dial_history, comms_established_at["value"], time.time())
+                            priority_holder["value"], dial_history, dial_message_times = dial_task.result()
+                            log_status(f"dial resolved: {priority_holder['value']}")
+                            write_negotiation_trace(dial_history, dial_message_times, comms_established_at["value"], time.time())
                     dial_holder["task"] = None
 
                 action = decide_movement(obs, priority_holder["value"], me.name, other.name)
                 await mcp_call(world, "propose_action", side=side, action=action)
-                await asyncio.sleep(0.2)
     finally:
         server.should_exit = True
         await server_task
@@ -546,6 +577,11 @@ def main():
     )
     parser.add_argument("--webhook-port", type=int, default=9002, help="this robot's own callback port, with --webhook")
     parser.add_argument("--world-url", default=None, help="Phase 6/D18: also move through world_server.py's grid, negotiating dynamically at the boundary")
+    parser.add_argument(
+        "--debug-log",
+        action="store_true",
+        help="D29: write experiments/results/robot_status_<side>.jsonl, a real-time log of this robot's own decision points, for export_timeline_csv.py. Off by default - only turn on when actually debugging.",
+    )
     args = parser.parse_args()
 
     me, other = build_robots(args.side, args.scenario, args.policy)
@@ -553,7 +589,11 @@ def main():
     if args.world_url:
         print(f"{me.name} ({args.policy}) moving via {args.world_url}, ready to negotiate {args.scenario} at the boundary")
         webhook_port = args.webhook_port if args.webhook else None
-        asyncio.run(run_robot(me, other, args.side, args.port, args.peer_url, args.world_url, args.max_turns, webhook_port))
+        asyncio.run(
+            run_robot(
+                me, other, args.side, args.port, args.peer_url, args.world_url, args.max_turns, webhook_port, args.debug_log
+            )
+        )
         return 0
 
     if args.side == "a":

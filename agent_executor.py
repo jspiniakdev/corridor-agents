@@ -13,6 +13,7 @@ the true chronological history by hand on every call.
 """
 
 import sys
+import time
 
 sys.path.insert(0, "src")
 
@@ -56,13 +57,17 @@ class NegotiationExecutor(AgentExecutor):
     agent.py builds today; `other` stays a placeholder with no real secret,
     same isolation guarantee as Phase 4.
 
-    `on_resolved`, if given, is called once with (outcome, history) - the
-    negotiated outcome (a robot name, or None for a deadlock) and the
-    full message transcript - the moment this side of the negotiation
-    learns it. This is the one way a world-movement loop finds out
-    priority was decided by an *incoming* negotiation (since that happens
-    entirely inside execute(), not in the loop's own coroutine), and the
-    only way it can write out a full trace file afterward - see D19.
+    `on_resolved`, if given, is called once with (outcome, history,
+    message_times) - the negotiated outcome (a robot name, or None for a
+    deadlock), the full message transcript, and a real time.time() per
+    message (D29, parallel by index - self.message_times, extended
+    lazily each call since history is rebuilt fresh from the a2a task
+    every time, not accumulated locally) - the moment this side of the
+    negotiation learns it. This is the one way a world-movement loop
+    finds out priority was decided by an *incoming* negotiation (since
+    that happens entirely inside execute(), not in the loop's own
+    coroutine), and the only way it can write out a full trace file
+    afterward - see D19.
 
     `on_task_started`, if given, is called once - with the peer's name -
     the instant a brand-new task arrives, *before* any policy call. This
@@ -77,6 +82,7 @@ class NegotiationExecutor(AgentExecutor):
         self.max_turns = max_turns
         self.on_resolved = on_resolved
         self.on_task_started = on_task_started
+        self.message_times = []  # D29 - real time.time() per history entry, index-parallel
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         is_new_task = context.current_task is None
@@ -86,17 +92,27 @@ class NegotiationExecutor(AgentExecutor):
             if self.on_task_started:
                 self.on_task_started(self.other.name)
 
+        # history is rebuilt fresh from the a2a task every call (D15's own
+        # docstring above), not accumulated locally - so a message only
+        # gets a timestamp the first time this process observes it. Not
+        # exactly its author's send time, but real and monotonic, and the
+        # only signal this side has for messages the peer authored.
+        now = time.time()
+        while len(self.message_times) < len(history):
+            self.message_times.append(now)
+
         updater = TaskUpdater(event_queue, task.id, task.context_id)
 
         if not should_respond(history, self.max_turns):
             # already agreed, or out of turns - nothing more to say
             if self.on_resolved:
-                self.on_resolved(check_agreement(history), history)
+                self.on_resolved(check_agreement(history), history, list(self.message_times))
             await updater.complete()
             return
 
         await updater.start_work()  # the streaming heartbeat: "still here, thinking"
         reply = self.me.policy.respond(self.me, self.other, history, self.max_turns)
+        self.message_times.append(time.time())
 
         print(f"  {reply}")
         reply_message = new_data_message(
@@ -108,7 +124,7 @@ class NegotiationExecutor(AgentExecutor):
         outcome = check_agreement(history + [reply])
         if outcome is not None:
             if self.on_resolved:
-                self.on_resolved(outcome, history + [reply])
+                self.on_resolved(outcome, history + [reply], list(self.message_times))
             await updater.complete(message=reply_message)
         else:
             await updater.requires_input(message=reply_message)

@@ -15,7 +15,7 @@ from a2a.types.a2a_pb2 import Role, StreamResponse
 
 from scenarios import SCENARIOS  # noqa: E402
 from wire import message_to_dict  # noqa: E402
-from agent import build_robots, extract_reply, is_my_turn_to_initiate, should_skip_jitter  # noqa: E402
+from agent import build_robots, extract_reply, is_my_turn_to_initiate  # noqa: E402
 
 
 def test_build_robots_side_a_gets_the_real_secret_and_b_is_a_placeholder():
@@ -79,16 +79,3 @@ def test_extract_reply_returns_nothing_for_an_unrelated_event():
 def test_is_my_turn_to_initiate_robot_a_wins_ties():
     assert is_my_turn_to_initiate("Robot A", "Robot B") is True
     assert is_my_turn_to_initiate("Robot B", "Robot A") is False
-
-
-def test_should_skip_jitter_when_the_other_robot_is_far_from_its_own_boundary():
-    assert should_skip_jitter({"other_distance_to_boundary": 22}) is True
-
-
-def test_should_skip_jitter_is_false_when_a_real_race_is_plausible():
-    assert should_skip_jitter({"other_distance_to_boundary": 1}) is False
-    assert should_skip_jitter({"other_distance_to_boundary": 5}) is False  # exactly at the threshold
-
-
-def test_should_skip_jitter_is_false_when_the_other_robot_isnt_sensed_at_all():
-    assert should_skip_jitter({"other_distance_to_boundary": None}) is False

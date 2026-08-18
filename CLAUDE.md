@@ -51,21 +51,33 @@ world's authority narrows to exactly the one thing no single robot can
 safely decide alone: is it safe to enter the shared corridor zone right
 now. See D17.
 
-**Dynamic initiation (D18, D27):** `--side a`/`--side b` no longer means
-"client-only" vs "server-only" - every `agent.py --world-url` process
-always runs its own A2A server *and* its own movement loop *and* is
-capable of dialing the peer, the instant its own observation says it's
-at the boundary and can sense the other (D12's physical logic,
-unchanged). The dial is jittered and cancellable; a genuine race (both
-sides dial before either sees the other's incoming call) is resolved by
-a fixed name tiebreak cancelling the loser's outbound attempt. The
-tiebreak *winner* also cancels its own outbound dial once `on_resolved`
-tells it the outcome is already known via the loser's incoming call
-(D27) - without this the winner could end up running two concurrent
-negotiations for one standoff, a crash this project never observed until
-D26 reverted to a grid small enough for real two-sided races to actually
-happen. Verified live, repeatedly, including real caught races on both
-sides of the tiebreak.
+**Dynamic initiation (D18, D27, D30):** `--side a`/`--side b` no longer
+means "client-only" vs "server-only" - every `agent.py --world-url`
+process always runs its own A2A server *and* its own movement loop *and*
+is capable of dialing the peer, the instant its own observation says
+it's at the boundary and can sense the other (D12's physical logic,
+unchanged). The dial is cancellable (jitter was tried, then removed in
+D30 - see below); a genuine race (both sides dial before either sees the
+other's incoming call) is resolved by a fixed name tiebreak cancelling
+the loser's outbound attempt. The tiebreak *winner* also cancels its own
+outbound dial once `on_resolved` tells it the outcome is already known
+via the loser's incoming call (D27) - without this the winner could end
+up running two concurrent negotiations for one standoff, a crash this
+project never observed until D26 reverted to a grid small enough for
+real two-sided races to actually happen. Verified live, repeatedly,
+including real caught races on both sides of the tiebreak.
+
+**Movement pacing (D30):** a robot advances at most one cell per
+`POLL_INTERVAL_SECONDS` (1.0, was 0.2) - the same "how often does a
+robot check in with the world" mechanism as always, just recalibrated so
+movement doesn't look instantaneous next to a multi-second LLM
+negotiation. Jitter (D18's random pre-dial delay, then D23's
+distance-aware skip) is gone entirely - removed, not just retuned, once
+a poll interval this wide made a jitter window narrower than it
+pointless (both sides still act on their very next poll regardless of
+the draw), and once it was clear jitter was never load-bearing for
+correctness anyway - D18's tiebreak + D27's cancellation already
+guarantee a clean single outcome regardless of timing.
 
 **The network visualizer (D19, D20, D22):** `visualize_network.py` is a
 new post-hoc tool. Fetches the completed episode's log from
@@ -83,9 +95,9 @@ before the negotiation dialogue. **(D25)** consecutive idle "wait/wait"
 polling rows are now collapsed into one labeled frame - `LLMPolicy`'s
 synchronous API calls (D15) block the negotiating robot's whole process
 for several real seconds, during which the *other* robot's process keeps
-polling every ~0.2s and logging no-op rows; without collapsing, a replay
-could show dozens of identical empty frames between "establishing comms"
-and the actual dialogue. **(D28)** a robot that hasn't logged its own
+polling (D30: once per `POLL_INTERVAL_SECONDS`) and logging no-op rows;
+without collapsing, a replay could show many identical empty frames
+between "establishing comms" and the actual dialogue. **(D28)** a robot that hasn't logged its own
 first `propose_action` call yet (its OS process simply started a beat
 after its peer's) now shows as "not started," not "wait" - the two used
 to be indistinguishable, making a robot that hadn't spoken yet look like
@@ -102,18 +114,14 @@ it's close enough to the shared zone to be a real collision risk, not
 from anywhere on the map. `world_eval.py`'s stats after reverting are
 byte-identical to the original pre-D21 baseline.
 
-**Timestamp-based negotiation attribution (D22) and distance-aware jitter
-(D23):** the visualizer's original heuristic for "when did negotiation
-happen" (first log entry where the winner moves off its own boundary)
-broke on the asymmetric grid - fixed by having `world_server.py` and
+**Timestamp-based negotiation attribution (D22):** the visualizer's
+original heuristic for "when did negotiation happen" (first log entry
+where the winner moves off its own boundary) broke on the (since-
+reverted, D26) asymmetric grid - fixed by having `world_server.py` and
 `agent.py` log real `time.time()` and correlating them directly, instead
-of inferring timing from movement. The same asymmetry exposed a second
-issue: jitter (D18) was firing even when the other robot was 20+ steps
-away and no real race was possible. `get_observation()` now reports
-`other_distance_to_boundary`; `agent.py`'s `should_skip_jitter()` skips
-the jitter delay entirely past `RACE_PLAUSIBLE_DISTANCE` (5) - not
-safety-critical (D18's tiebreak still handles correctness regardless),
-just removes a pointless delay.
+of inferring timing from movement. Still current. (D23's distance-aware
+jitter skip, built alongside this at the time, is gone - jitter itself
+was removed entirely in D30.)
 
 **Live observation composition (D24):** a previously-hidden gap - Phase
 3's `compose_observation()` (position/sensor facts, D4b's Job 4) was
@@ -127,13 +135,25 @@ equivalent, also carrying D23's `other_distance_to_boundary`), wired into
 MCP observation every loop iteration, using the original private text
 captured once so it never compounds.
 
+**Raw ground-truth debugging (D29):** every message now carries a real
+per-message `time.time()` in `experiments/results/negotiation_trace.json`
+(always on, cheap). `agent.py --debug-log` (off by default) writes
+`experiments/results/robot_status_<side>.jsonl`, a structured log of a
+robot's own real decision points. New `export_timeline_csv.py` merges the
+world log, message timestamps, and (if present) the status logs into one
+raw, unfiltered `experiments/results/episode_timeline.csv` - one row per
+real event, nothing collapsed or forward-filled - built specifically to
+debug without going through `visualize_network.py`'s rendered replay at
+all, after D22/D25/D28 all turned out to be replay-rendering artifacts,
+not real bugs.
+
 **Next: Phase 7 — containers** (Docker + Compose). See `PLAN.md` §5.
 
 ## How to run things
 
 ```bash
 source .venv/bin/activate        # Python 3.13; required in each new shell
-python -m pytest tests/ -q       # 98 tests, no API calls, ~0.03s
+python -m pytest tests/ -q       # 99 tests, no API calls, ~0.03s
 python run.py                    # one negotiation, deterministic policies
 python run.py --a llm --b llm    # needs: cp .env.example .env && source .env
 python eval.py                   # measurement sweep, deterministic cases only
@@ -153,14 +173,27 @@ python agent.py --scenario <id> --side a --policy stubborn --peer-url http://127
 python agent.py --scenario <id> --side a --policy stubborn --peer-url http://127.0.0.1:9001 --webhook
 
 # Phase 6 + D18: three terminals - the world, then both robots. Both sides
-# need --port/--peer-url now (every robot can dial and can be dialed):
+# need --port/--peer-url now (every robot can dial and can be dialed).
+# --side a starts first by convention (D31) - no correctness requirement
+# either order works (D18's dynamic initiation is symmetric) - but
+# whichever one starts first gets a real, small process-startup head
+# start every time, which showed up as confusing, seemingly-inconsistent
+# timing while debugging (D29's CSV export). --side a first just makes
+# that head start consistent and named, instead of an unlabeled artifact
+# of "b happened to be listed first":
 python world_server.py --port 9500
-python agent.py --scenario <id> --side b --policy always_yield --port 9002 --peer-url http://127.0.0.1:9001 --world-url http://127.0.0.1:9500/mcp
 python agent.py --scenario <id> --side a --policy stubborn  --port 9001 --peer-url http://127.0.0.1:9002 --world-url http://127.0.0.1:9500/mcp
+python agent.py --scenario <id> --side b --policy always_yield --port 9002 --peer-url http://127.0.0.1:9001 --world-url http://127.0.0.1:9500/mcp
 
 # D19: after the episode above finishes, render it (world_server.py must
 # still be running - it holds the log)
 python visualize_network.py --scenario <id> --a stubborn --b always_yield --world-url http://127.0.0.1:9500/mcp
+
+# D29: raw CSV instead of (or alongside) the HTML replay - same timing,
+# world_server.py must still be running. Add --debug-log to each agent.py
+# run above first if you also want robot-status rows, not just world +
+# messages.
+python export_timeline_csv.py --world-url http://127.0.0.1:9500/mcp
 
 # agent.py's --scenario/--policy default to routine_vs_medical/llm (the
 # project's go-to demo case) - a bare `python agent.py --side a --port ...`

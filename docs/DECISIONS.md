@@ -1233,3 +1233,167 @@ suite (98 tests) and `simulate.py`/`world_eval.py` regression unaffected.
 processes genuinely simultaneously (unlikely, and not something this
 project has a reason to pursue) - the gap would just shrink to zero rows
 most of the time, not need reverting.
+
+## D29 — Per-message timestamps, an opt-in robot-status log, and a raw CSV timeline export
+
+**Decided:** three additions, all in service of debugging a networked
+episode without going through `visualize_network.py`'s rendered replay at
+all:
+
+1. `run_initiator`/`run_initiator_webhook` (`agent.py`) and
+   `NegotiationExecutor` (`agent_executor.py`) now capture a real
+   `time.time()` per message, index-parallel to `history`
+   (`message_times`). `write_negotiation_trace()` embeds it as a
+   `"timestamp"` field per message in the trace JSON. Always on - cheap
+   (one more field on a file already written every run), no new I/O.
+   On the responder side, a message only gets a timestamp the first time
+   `NegotiationExecutor` observes it (`history` is rebuilt fresh from the
+   a2a task every call, D15's own docstring - not accumulated locally),
+   which approximates "when this process first learned about it" rather
+   than the original author's exact send time - close enough on
+   localhost, and the only signal this side actually has for messages
+   the peer authored.
+2. `agent.py` gained `--debug-log` (off by default). When set,
+   `run_robot()` writes every real decision point it already prints to
+   stdout - dialing, claiming priority alone, a race deferring, cancelling
+   a redundant dial (D27), a failed dial retrying, reaching target - to
+   `experiments/results/robot_status_<side>.jsonl`, structured
+   (`{"timestamp", "side", "detail"}`), one line per event. Not every
+   poll - only real state changes, the same moments already worth a
+   `print()` - logging every 0.2s (now 1s, D30) poll would just recreate
+   the flood-of-duplicates problem D25 already fixed in the visualizer.
+3. New `export_timeline_csv.py` - a standalone, post-hoc tool (same shape
+   as `visualize_network.py`) that merges `world_server.py`'s `get_log()`
+   (already real-timestamped, D20), the negotiation trace's per-message
+   timestamps, and the optional robot-status JSONL files into one
+   `experiments/results/episode_timeline.csv`, sorted by real timestamp.
+   Deliberately raw: one row per real event, nothing collapsed, nothing
+   forward-filled, nothing guessed - every column not relevant to a given
+   row's event type is just left blank. `build_timeline_rows()` (the
+   actual merge) is pure and unit-tested; fetching from MCP and writing
+   the file are manually verified, same split as everywhere else in this
+   project.
+
+**Why:** the user kept hitting cases where the *rendered replay* was the
+thing confusing them (D22's misattributed timing, D25's flood of idle
+frames, D28's "stuck" robot) - each one took a real investigation to
+confirm it wasn't a decision-logic bug, just a display artifact. A raw,
+unfiltered CSV sidesteps that whole category of confusion: nothing here
+is interpreted or re-timed for watchability, so there's nothing left to
+misread. The robot-status log specifically had to be opt-in - the user
+was explicit that normal runs shouldn't pay for data nobody's currently
+debugging with.
+
+**Verified live:** a full `routine_vs_medical` LLM-vs-LLM run with
+`--debug-log` on both sides produced a 39-row CSV; spot-checked with
+Python's own `csv.DictReader` (not just a naive comma-split terminal
+view, which mis-renders quoted commas inside message text) - message
+rows, world rows, and status rows all present, correctly timestamped and
+sorted, real quoting intact around commas in message text.
+
+**Would change our mind:** if a future need calls for *live* streaming
+export (tailing an in-progress episode) rather than post-hoc - this is
+deliberately a batch tool, reading a finished episode's already-written
+sources, same as `visualize_network.py`.
+
+## D30 — Movement paced to ~1s/cell; jitter removed
+
+**Decided:** `agent.py`'s hardcoded `asyncio.sleep(0.2)` (the bottom of
+`run_robot()`'s loop) is now `asyncio.sleep(POLL_INTERVAL_SECONDS)` with
+`POLL_INTERVAL_SECONDS = 1.0`. This is still the same single mechanism as
+before - how often a robot checks in with the world - not a new, separate
+"how long does moving one cell take" model; it governs movement, waiting,
+and negotiation-trigger cadence uniformly, just recalibrated from ~5
+checks/second to 1.
+
+Separately, jitter (D18: a random 0-1s delay before dialing, meant to
+reduce how often both robots dial at once) is removed entirely -
+`JITTER_SECONDS`, `jitter_deadline`, and D23's `RACE_PLAUSIBLE_DISTANCE`/
+`should_skip_jitter()` are all gone. The dial-trigger logic collapses to:
+at boundary, sensing the other, not already dialing or responding ->
+dial immediately. D18's tiebreak (`on_task_started`) and D27's redundant-
+dial cancellation (`on_resolved`) are completely unchanged - they're the
+actual correctness mechanism, and neither one ever depended on jitter
+existing.
+
+**Why the pacing change:** requested directly - at ~0.2s/cell, a robot's
+own movement was fast enough to look instantaneous next to a multi-second
+LLM negotiation, which made the negotiation delay look like the anomaly
+rather than the normal case. Slowing movement to ~1s/cell puts both on a
+more comparable, intuitive scale.
+
+**Why remove jitter instead of just retuning it:** raised directly by the
+user, and correct on inspection. Two things converged:
+1. Once the poll interval widened to 1s, a jitter window narrower than
+   that (e.g. 0.3s, floated first) can't actually spread anything - both
+   sides still act on their very next poll regardless of the random draw,
+   since the deadline is only ever checked once per poll. Below the poll
+   interval, jitter stops doing its one job.
+2. Jitter was never load-bearing for correctness in the first place -
+   D18's tiebreak + D27's cancellation already guarantee a race resolves
+   to exactly one outcome, cleanly, no matter the timing. Jitter only
+   reduced how *often* a race happened, and even that benefit was
+   smaller than it looked: `LLMPolicy.respond()` is a synchronous call
+   inside an `async def` (D15's own flagged limitation) - `.cancel()`
+   can't interrupt it mid-flight, so a race landing *during* that
+   blocking call wastes the LLM call regardless of whether jitter delayed
+   the dial that led to it. Given the real safety net was elsewhere
+   already, removing jitter is a straightforward complexity reduction,
+   not a risk trade-off.
+
+**Verified live:** a fresh `routine_vs_medical` LLM-vs-LLM run (with
+`--debug-log`, feeding directly into D29's CSV) shows consecutive
+same-side world-log rows ~1.0-1.03s apart, a genuine two-sided race still
+occurring and resolving cleanly (`Robot B: race - Robot A called in while
+I was dialing - deferring`, then `Robot A: outcome already known from an
+incoming call - cancelling my own outbound dial` - D27's mechanism firing
+exactly as designed, with no jitter involved at all), and the correct
+final outcome. Full suite: 99 passed (95 after removing the 3
+`should_skip_jitter` tests, +4 new `export_timeline_csv.py` tests, D29).
+`simulate.py`/`world_eval.py`/`run.py` regression unaffected (none of
+them touch `agent.py`).
+
+**Would change our mind:** if two-sided races become frequent enough in
+practice to cost meaningfully more in wasted LLM spend than the
+complexity jitter added was worth - the fix then would likely be
+something more effective than jitter ever was (e.g. narrowing the actual
+vulnerable window inside `LLMPolicy.respond()`, D15's real limitation)
+rather than reintroducing a delay that couldn't reliably prevent the cost
+it was meant to avoid.
+
+## D31 — `--side a` launches first by convention now, not `--side b`
+
+**Decided:** the documented three-terminal Phase 6/D18 run order in
+`CLAUDE.md` now launches `--side a` before `--side b` (was the reverse,
+unchanged since D17 first introduced the three-terminal form). No code
+changed - `agent.py`'s dynamic initiation (D18) is fully symmetric
+between the two sides; this is purely which line comes first in the
+documented commands (and in every ad hoc debugging run this session).
+Phase 5's fixed-role two-terminal form (no `--world-url`) is untouched -
+there, `--side b` genuinely must start first, since it's the A2A server
+`--side a` dials into; that's a real requirement, not a convention.
+
+**Why:** `POLL_INTERVAL_SECONDS`'s move to the top of `run_robot()`'s
+loop (D30) made every robot's pacing uniform and correct - which then
+made it *more* visible, not less, that whichever robot's OS process
+happens to launch first always gets a small, real (~0.2-0.3s) head
+start purely from process/MCP-connection startup timing, every single
+time, regardless of which side. Chasing this down consumed real
+debugging time across two separate false leads (a boundary-distance
+explanation, then a "these are B's positions" misread of a shared
+column) before the user's own hypothesis - "is it just launch order?" -
+turned out to be the actual answer, confirmed by swapping the order live
+and watching the head start flip from B to A. Naming and fixing the
+convention doesn't remove the head start (nothing can, short of true
+simultaneous process launch, which the shell doesn't offer) - it just
+stops it from being an unlabeled, silently-inconsistent variable in
+every future debugging session.
+
+**Verified live:** swapped launch order twice (B-first, then A-first),
+confirmed the head start moved with whichever side launched first both
+times, via `export_timeline_csv.py`'s output.
+
+**Would change our mind:** if a future need calls for genuinely
+simultaneous launch (e.g. a wrapper script that starts both processes
+from the same parent at once) - worth building if this head start ever
+matters for something more than readability, but not needed today.
