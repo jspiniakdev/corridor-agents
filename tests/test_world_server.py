@@ -1,0 +1,81 @@
+"""Tests for world_server.py's tools. These are plain Python functions even
+after @mcp.tool() - no real MCP server or network needed to test the logic,
+same "test the decision, not the transport" split used throughout this
+project. Real client/server wiring is manually verified instead (see D17).
+"""
+
+import sys
+
+sys.path.insert(0, ".")
+sys.path.insert(0, "src")
+
+import world_server as ws  # noqa: E402
+
+
+def reset_state():
+    ws.STATE = ws.build_state()
+
+
+def test_get_map_matches_world_constants():
+    reset_state()
+    result = ws.get_map()
+    assert result["corridor_zone"] == [3, 4, 5]
+    assert result["a_boundary"] == 2
+    assert result["b_boundary"] == 6
+
+
+def test_get_observation_reflects_current_position():
+    reset_state()
+    obs = ws.get_observation("a")
+    assert obs["position"] == 1
+    assert obs["at_boundary"] is False
+    assert obs["sensed_other"] is False  # A=1, B=8, gap=7 > SENSOR_RANGE=6
+
+
+def test_get_observation_senses_other_within_range():
+    reset_state()
+    ws.STATE.a.position = 3
+    ws.STATE.b.position = 5
+    obs = ws.get_observation("a")
+    assert obs["sensed_other"] is True
+    assert obs["gap_if_sensed"] == 2
+
+
+def test_propose_action_rejects_invalid_action():
+    reset_state()
+    try:
+        ws.propose_action("a", "sprint")
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
+def test_propose_action_moves_when_safe():
+    reset_state()
+    result = ws.propose_action("a", "move")
+    assert result == {"accepted": True, "actual_position": 2}
+    assert ws.STATE.a.position == 2
+
+
+def test_propose_action_wait_never_changes_position():
+    reset_state()
+    result = ws.propose_action("a", "wait")
+    assert result == {"accepted": True, "actual_position": 1}
+
+
+def test_propose_action_blocks_entry_while_the_other_robot_is_in_the_zone():
+    reset_state()
+    ws.STATE.a.position = 4  # already inside the corridor zone
+    ws.STATE.b.position = 6  # at its boundary, about to try entering
+
+    result = ws.propose_action("b", "move")
+
+    assert result["accepted"] is False
+    assert result["actual_position"] == 6  # held at the boundary
+    assert ws.STATE.b.position == 6
+
+
+def test_propose_action_only_moves_the_requesting_side():
+    reset_state()
+    ws.propose_action("a", "move")
+    assert ws.STATE.b.position == 8  # untouched by A's call

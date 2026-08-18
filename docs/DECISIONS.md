@@ -394,3 +394,266 @@ blocks (`check_agreement`) directly instead of being driven by it.
 negotiation starts (agreeing on which scenario, confirming both sides are
 up) - that's explicitly deferred to Phase 5's A2A agent cards, not something
 to bolt onto this dumb board.
+
+---
+
+## D15 — Phase 5: real A2A, staged (core swap, then streaming, then webhooks)
+
+**Decided:** `comms_server.py` is deleted, not adapted - A2A has no
+message-board concept, so there's no longer a third process at all. Each
+robot is its own process (`agent.py`) that's *either* a pure A2A client
+(`--side a`, the initiator) *or* a pure A2A server (`--side b`, the
+responder, hosting `agent_executor.NegotiationExecutor`) for a given
+negotiation. One negotiation is one A2A task; the initiator convention
+reuses Phase 4's `--side` split unchanged - side `a` always dials, exactly
+like `len(history) % 2 == 0` already meant "A goes first." Built in three
+stages, matching how Phase 4 was actually built (incrementally, not all at
+once): plain request/response first, verified against `run.py`'s baseline;
+then streaming; then webhooks - all three ended up built this phase.
+
+**Rejected:** the original Phase 4 alternative of routing negotiation
+through a relay-like third process - already rejected once for the
+homemade board (D14) and doesn't reappear here; A2A's peer-to-peer model
+makes that mistake structurally unavailable this time; there's no shared
+process to accidentally lean on.
+
+**A real finding that changed the design mid-build:** research into
+`a2a-sdk`'s actual API (v1.1.2, protobuf-based - `a2a.types.a2a_pb2`, not
+the plain-dataclass shape some older blog posts show) turned out
+insufficient on its own, the same way reading `negotiation.py` alone
+wouldn't have caught D11's `REJECT` bug. A live probe server/client caught
+something the source didn't make obvious: a task's own pending
+`status.message` (this robot's last reply) and the newest incoming
+`context.message` are **not** folded into `task.history` until the
+*following* call - only the framework's internal bookkeeping does that,
+one call late. `agent_executor.history_from_context()` reconstructs the
+true chronological history by hand every call
+(`task.history + [status.message if present] + [context.message]`) rather
+than trusting `task.history` alone. Confirmed with three live calls in a
+row, watching the real object state change each time - not inferred from
+documentation.
+
+**Streaming:** the responder publishes one `TASK_STATE_WORKING` heartbeat
+(`updater.start_work()`) before calling the (possibly slow) policy, so the
+initiator can distinguish "peer is thinking" from "peer is down" - both
+looked identical under Phase 4's plain request/response. Deliberately
+narrow: this streams task *lifecycle* events, not the LLM's partial
+output token-by-token - a coarse liveness pulse, not a content-streaming
+feature. `should_respond()` was split out of what used to be
+`agent_executor.decide()` specifically so the executor can publish that
+heartbeat at the exact point between "confirmed there's a turn to take"
+and "the policy call that takes it."
+
+**Webhooks:** the initiator (`--side a --webhook`) registers a callback
+URL and sends with `configuration.return_immediately=True`, gets back only
+the task's creation ack, and does not hold the connection open - it awaits
+its own tiny inbound receiver instead. This is the one piece that makes
+Robot A a server too, not just a client, which is a real architectural
+cost the plan flagged before building it (see the "webhook scope"
+check-in). The responder (`run_responder`) is unconditionally wired with a
+`PushNotificationConfigStore`/`PushNotificationSender` - dormant unless a
+caller actually registers a config, so `run_initiator` (no `--webhook`)
+is unaffected.
+
+**A second live-caught bug, this time in webhook mode specifically:** the
+very first attempt sent a duplicate message into an already-completed
+task. Cause: the task-creation event that already came back synchronously
+as the `return_immediately` ack *also* gets pushed to the webhook again
+(state `SUBMITTED`), ahead of the real answer. The initiator's callback
+loop was only filtering out `WORKING`, so it treated that duplicate
+`SUBMITTED` push as if it were the final answer, decided nothing had been
+resolved, and sent another message - which the server correctly rejected
+("Task is already completed"). Fixed by filtering out both `SUBMITTED`
+and `WORKING` as "not yet an answer," not just `WORKING`. Caught by
+actually running two live processes against each other, not by reasoning
+about the SDK's event model in the abstract - same discipline as the
+`history_from_context` finding above, applied a second time in the same
+phase.
+
+**New dependencies:** `a2a-sdk` pulls in a meaningfully heavier chain than
+anything else in this project - `protobuf`, `google-api-core`,
+`google-auth`, `cryptography` - plus `sse-starlette`, an undeclared
+transitive dependency its JSON-RPC routes need directly (import fails
+without it; added to `requirements.txt` explicitly rather than left
+implicit). This is a real, deliberate departure from D7/"boring stdlib
+code, new dependencies need a reason" - the reason here is simply that
+this is what adopting the *real* protocol costs; it was flagged, not
+absorbed silently.
+
+**Would change our mind:** if a genuinely long-running policy shows up
+(the thing webhooks are actually for), worth re-testing this exact path
+against it rather than trusting today's fast-policy-only verification
+generalizes; today's negotiations all resolve in well under a second, so
+the webhook path has only been proven mechanically correct, not proven
+under real long-wait conditions.
+
+---
+
+## D16 — A networked robot process only ever loads its own half of a scenario
+
+**Decided:** `scenarios.py` gets one new accessor, `for_side(scenario_id,
+side) -> (situation, urgency)`. `agent.py`'s `build_robots()` calls it
+instead of taking a `Scenario` object at all - `main()` no longer does
+`BY_ID[args.scenario]` and never holds a reference to the full paired
+scenario. Only `run.py`/`eval.py`/`simulate.py`/`world_eval.py` still load
+the full `Scenario` (both halves + `should_go_first`), because they
+legitimately need it - they're the omniscient single-process harness that
+scores correctness, not a robot.
+
+**Rejected:** leaving `agent.py` to keep loading the full `Scenario` and
+trusting `build_robots()` to only read its own half - which is exactly
+what it already did, correctly, before this decision. The gap wasn't a
+bug; it was the same kind of discipline-not-structure gap the `other =
+Robot(name, "", 0)` placeholder (Phase 4 v1's "Correction 1") already
+closed for the *other robot's* `Robot` object. This closes the matching
+gap one level up, for where `me`'s own data comes from.
+
+**Why:** raised directly by the user while reviewing Phase 5 - since the
+robots are already separate OS processes (Phase 4), a scenario should
+define what *one* robot sees, not a pair, the same way `PLAN.md` §4.1
+already frames a robot's situation as private. Before this, nothing
+*read* the other robot's secret in `agent.py`, but the full pair sat in
+that process's own working memory (`scenario.a_situation` and
+`scenario.b_situation` both reachable from one local variable) for the
+whole run - a future change (a stray debug print, a refactor that grabs
+the wrong field) could leak it with no test catching it. Same reasoning
+as D12's "the reactive layer's guarantee needs to hold even if the
+executive layer is wrong, later, for reasons nobody anticipated," applied
+to secrecy instead of collision safety.
+
+**An honest limit on how far this goes:** `scenarios.py` itself is one
+shared, statically-defined module (`SCENARIOS` embeds both halves of
+every scenario in source) that both `--side a` and `--side b` processes
+import - so the *data* for both halves technically still loads into both
+processes' memory the moment `agent.py` does `from scenarios import
+...`, same as `negotiation.py`'s `LLMPolicy` class being importable by
+both sides. What changed is that neither process's own *working state*
+(`me`, `other`, or any local variable in `agent.py`/`agent_executor.py`)
+ever holds a reference to the other side's values anymore - confirmed by
+grepping both files for `scenario.` and `BY_ID[` after the change: zero
+hits outside `scenarios.py` itself. This is "shared code, not shared
+state," the same distinction already established for why `negotiation.py`
+being one file both processes import is fine. Going further - genuinely
+splitting the source data per side, e.g. two files or a per-side lookup
+service - would be the next step if this project ever needed to defend
+against something reading the *module*, not just something reading
+`agent.py`'s own variables; not needed for a learning project with no
+adversarial attacker model.
+
+**Would change our mind:** if Phase 8+ (three or more robots, real
+services) ever puts scenario data behind something other robots could
+plausibly query (a shared config service, a mounted file) - at that point
+"shared code" stops being an accurate description and the harder
+per-side-file split from the paragraph above would be worth doing for
+real.
+
+---
+
+## D17 — Phase 6: the world as a real MCP server, and who executes vs. who validates
+
+**Decided:** `world_server.py` is a new MCP server exposing three tools -
+`get_map()`, `get_observation(side)`, `propose_action(side, action)`. It
+holds the only copy of ground-truth position (`WorldState`, reused
+directly from `world.py`, unchanged). `agent.py` gets a `--world-url`
+flag; when given one, it also becomes an MCP client and runs a movement
+loop alongside its existing A2A negotiation role. Negotiation stays
+exactly as Phase 5 built it (`--side a` is still the fixed initiator, per
+the plan's explicit staging) - the only thing that changed this phase is
+*when* it fires: gated on a robot's own `get_observation()` saying it's
+at the boundary and can sense the other, matching Phase 3's original
+physical logic (D12), now driven by a real MCP call instead of an
+in-process simulator check. Arriving at the boundary alone still claims
+priority for free, zero negotiation, exactly as before.
+
+`world.py`/`simulate.py` are **completely untouched** - not "split," the
+original plan's wording. `simulate.py` still needs the full
+`executive_decide`/`_resolve_priority` chain for its own single-process
+path, so nothing could be deleted from `world.py` without breaking it.
+`world_server.py` instead directly reuses `WorldState`/`RobotState`/
+`reactive_filter`/`apply` - the genuinely `Robot`-agnostic, safety-critical
+pieces - rather than moving or reimplementing anything.
+
+**What actually shipped is not what was first designed, in two ways -
+both caught only by building and testing, not by planning ahead:**
+
+**1. `propose_action`, not `propose_move`, and no background clock at
+all.** The original design (matching the approved plan) had the world
+run its own independent tick loop, applying whatever each robot had most
+recently proposed on a fixed schedule, with `propose_move()` reporting
+`last_applied` - the outcome of the *previous* tick, one full round
+behind whatever was just proposed. Working through this live surfaced a
+real problem: `last_applied` is only meaningful if a robot's own polling
+rate happens to line up with the server's independent tick rate, which
+nothing guarantees - poll faster and you see stale repeats, poll slower
+and you silently miss intermediate ticks. Worse, it also drifted from
+what a real robot actually is: a real robot commands its own motors and
+knows immediately whether it moved, it doesn't get told after the fact
+by an external clock.
+
+The resolution, reached collaboratively rather than designed upfront: the
+robot still decides and commits its own action, but the world's
+authority narrows to exactly the one thing no single robot can safely
+decide alone - whether it's safe to enter the shared corridor zone right
+now. `propose_action(side, action)` resolves **synchronously**, checked
+against `reactive_filter` and the world's *current* state (the other
+robot's action held fixed as `"wait"`, since only one robot transitions
+per call - there's no such thing as "simultaneous" once actions commit
+one at a time, so the both-enter-at-once case Phase 3 worried about
+structurally can't arise here), and returns the real, authoritative
+outcome immediately: `accepted` and `actual_position`. No independent
+clock, no staleness, no lag - and less code than the version with the
+background tick loop, not more.
+
+**Why position still lives in the world, not the robot:** raised
+directly in the same conversation - a position number only means
+anything relative to a shared coordinate system (the corridor, the
+boundaries, the zone) that the *world* defines, not something a robot can
+have an opinion about in isolation. So the robot still asks
+`get_observation()` for the current truth and still treats its own
+belief as provisional until confirmed - it just now also *drives* that
+truth via its own committed actions, instead of passively receiving
+whatever an independent clock decided.
+
+**The real-world analogy that resolved the disagreement:** the world
+retaining veto power over zone entry isn't "the world doing the robot's
+job" - it's the same thing rail interlocking and air traffic control do
+for a genuinely shared, contested resource. A train drives itself; it
+still doesn't enter a single-track section without permission from a
+signaling authority that tracks occupancy of *that specific resource*.
+Nobody considers that the signal box driving the train.
+
+**2. `NegotiationExecutor` needed a callback it didn't have.** Under the
+fixed-initiator convention, `--side b` never calls out - its own
+negotiated outcome only ever becomes known *inside*
+`NegotiationExecutor.execute()`, reacting to whatever `--side a` sends
+whenever it gets around to it. `--side b`'s own movement loop has no way
+to `await` that. Added `on_resolved`, an optional callback invoked at
+both points `execute()` learns `check_agreement()` is decided - the one
+way the movement loop learns priority was ever set at all.
+
+**Consequence:** `run_responder` (the plain, `--side b`-only path) is
+unchanged; a new `run_responder_async` (built on the same
+`uvicorn.Server(...).serve()`-as-a-background-task pattern
+`run_initiator_webhook` already established in Phase 5) runs the A2A
+server concurrently with the movement loop when `--world-url` is given.
+`run_initiator`/`run_initiator_webhook` now return the negotiated outcome
+instead of only printing it, so `run_initiator_with_world` can use it
+directly.
+
+**Verified end to end:** `world_server.py` + two `--world-url` `agent.py`
+processes, deterministic policies, `dying_battery_vs_fragile_cargo` -
+final positions (A=8, B=1) and outcome (agreed on Robot A) matched
+`simulate.py`'s in-process baseline exactly. Collision safety re-verified
+live across the real process boundary under the new synchronous design,
+same as the first version.
+
+**Explicitly deferred, unchanged from the plan:** boundary-triggered
+*dynamic* initiation (either robot can become the initiator, with jitter
++ a name tiebreak for the race case) and the visualizer rebuild - both
+still their own follow-on plans.
+
+**Would change our mind:** if a future phase needs multiple robots
+transitioning in true lockstep (a synchronized global tick actually
+mattering, not just each robot's own local decision) - that would justify
+reintroducing something like the independent clock this decision removed,
+but nothing in this project currently needs that.

@@ -185,7 +185,7 @@ absolutely can refuse to yield.
 
 Practically, the simulator becomes an MCP server exposing `get_observation()`,
 `propose_move()`, `get_map()`, and each robot is an MCP client. The payoff lands
-at Phase 10: swapping the text grid for a real simulator means writing a new MCP
+at Phase 11: swapping the text grid for a real simulator means writing a new MCP
 server with the same tool names, and **the agents don't change at all.** That is
 the N×M → N+M benefit arriving in our own repo.
 
@@ -258,14 +258,29 @@ streaming, webhook callbacks.
 as obvious rather than as ceremony. Adopting it in Phase 1 would have been
 cargo-culting a protocol we didn't understand.
 
-### Phase 6 — Containers
+### Phase 6 — The world as an MCP server
+**~4h · Infra: `mcp` (Python SDK), still localhost**
+
+Reconnect the grid to the now-networked robots, over the protocol §4.2 always
+described: `world_server.py` exposes `get_map()`, `get_observation(side)`,
+`propose_action(side, action)`. The world stays the sole authority on ground
+truth and the one thing no single robot can safely decide alone - whether it's
+safe to enter the shared corridor zone - but a robot commands its own motors
+and decides its own move/wait, the same as a real one would.
+
+*Why this had to happen before more robots or the cloud:* Phases 4-5 split
+*negotiation* into real processes but left the grid living only inside the
+single-process tools (`simulate.py`) - the networked robots had no world to
+move through at all. See D17.
+
+### Phase 7 — Containers
 **~5h · Infra: Docker, Docker Compose**
 
 Each agent gets a container; Compose runs the fleet. Nothing behaves
 differently, but the local setup now matches what the cloud will run — which is
-what makes Phase 7 boring instead of miserable.
+what makes Phase 8 boring instead of miserable.
 
-### Phase 7 — Deploy
+### Phase 8 — Deploy
 **~1 weekend, plus an IAM tax · Infra: Cloud Run, Secret Manager, Vertex AI**
 
 One agent to Cloud Run first, then the rest. Each agent gets **its own service
@@ -278,7 +293,7 @@ under one auth system and one bill.
 
 Budget an extra half-day for IAM specifically. Everyone loses time there.
 
-### Phase 8 — Three or more robots
+### Phase 9 — Three or more robots
 **~6h · Infra: Pub/Sub, Firestore**
 
 Two agents can just talk to each other. Three need **discovery** (who exists?)
@@ -288,13 +303,13 @@ carries announcements.
 
 *This is the phase where "multi-agent system" starts being literally true.*
 
-### Phase 9 — See what's happening
+### Phase 10 — See what's happening
 **~4h · Infra: OpenTelemetry → Cloud Trace**
 
 Every A2A message becomes a span. Debugging a three-way negotiation from raw
 logs is genuinely miserable, and by this point that's what we'd be doing.
 
-### Phase 10+ — The actual project, indefinitely
+### Phase 11+ — The actual project, indefinitely
 
 Protocol experiments, a few hours each:
 
@@ -309,7 +324,7 @@ Protocol experiments, a few hours each:
 - Let a robot refuse to disclose. Does trust emerge over repeated encounters?
 - Replace the grid with a real simulator, or a ROS 2 bridge, or a cheap rover.
 
-**Phases 1–9 are the substrate. Phase 10 is the project.**
+**Phases 1–10 are the substrate. Phase 11 is the project.**
 
 ---
 
@@ -320,14 +335,14 @@ Protocol experiments, a few hours each:
 | Option | Verdict |
 |---|---|
 | **Cloud Run** ✅ | Scales to zero, so idle costs roughly nothing. Each service gets its own URL and its own service account — a real identity boundary per agent, which is exactly the interesting part. Native HTTPS and SSE, which A2A needs. Container-based, so local Compose and cloud run the same image. |
-| **Vertex AI Agent Engine** ❌ *for now* | Managed sessions and memory are nice, but it bills continuously (~$0.086/vCPU-hour, so one always-warm vCPU is ~$60/month before any model calls, plus ~$0.25 per 1,000 session events) and it abstracts away precisely the A2A plumbing this project exists to learn. Worth revisiting at Phase 10+ if its Memory Bank becomes appealing. |
+| **Vertex AI Agent Engine** ❌ *for now* | Managed sessions and memory are nice, but it bills continuously (~$0.086/vCPU-hour, so one always-warm vCPU is ~$60/month before any model calls, plus ~$0.25 per 1,000 session events) and it abstracts away precisely the A2A plumbing this project exists to learn. Worth revisiting at Phase 11+ if its Memory Bank becomes appealing. |
 | **GKE** ❌ | A cluster costs money 24/7 and adds Kubernetes to a project that already has enough new concepts. |
 | **A VM running everything** ❌ | Cheap and simple, but it collapses the agents back into one box and loses the per-agent identity that makes the exercise worthwhile. |
 
 ### Where does the simulator run?
 
 The simulator is **stateful and long-lived**, so it does not fit scale-to-zero.
-It stays on the laptop for a long time — probably through Phase 9. When it needs
+It stays on the laptop for a long time — probably through Phase 10. When it needs
 to run unattended, it goes on a single small spot VM. Keeping the sim local
 while the agents are in the cloud is a perfectly good intermediate state, and
 it's also a nice forcing function for making the agents genuinely network-based.
@@ -336,7 +351,7 @@ it's also a nice forcing function for making the agents genuinely network-based.
 
 - **Phases 1–6:** the Anthropic API directly. One environment variable. Adding
   GCP auth this early buys nothing.
-- **Phase 7 onward:** Claude on Vertex AI. Once everything else is GCP, one auth
+- **Phase 8 onward:** Claude on Vertex AI. Once everything else is GCP, one auth
   system and one bill is worth the small migration.
 - **Model choice:** `claude-sonnet-5` for negotiation. Evals multiply calls fast
   (agents × rounds × episodes), so keep the loop cheap and reserve anything
@@ -347,15 +362,15 @@ it's also a nice forcing function for making the agents genuinely network-based.
 
 - **Firestore** — task state, agent registry, episode results. Serverless,
   free-tier-friendly, no instance to keep warm.
-- **Pub/Sub** — broadcast announcements, from Phase 8 when there are 3+ agents.
+- **Pub/Sub** — broadcast announcements, from Phase 9 when there are 3+ agents.
 - **A2A webhooks** — for negotiation rounds that outlive an HTTP request. Better
   than holding an SSE connection open for minutes.
 - **Secret Manager** — API keys. Never in the image, never in env vars in git.
 
-### Phase 10 infra: three workloads that are not services
+### Phase 11 infra: three workloads that are not services
 
-The agents never move — Cloud Run, one service each, from Phase 7 onward. What
-changes at Phase 10 is everything *around* them.
+The agents never move — Cloud Run, one service each, from Phase 8 onward. What
+changes at Phase 11 is everything *around* them.
 
 **1. Eval sweeps → Cloud Run Jobs.** 200 episodes × 5 agents is batch work with
 a beginning and an end, not a service waiting for traffic. Same container, run
@@ -383,7 +398,7 @@ large internal state and need a GPU, which means a GCE spot VM per experiment.
 Cloud Run does offer GPUs that scale to zero, but that doesn't help: the problem
 is statefulness, not the GPU.
 
-**Opinion: at Phase 10, scale episodes, not fidelity.** The research question is
+**Opinion: at Phase 11, scale episodes, not fidelity.** The research question is
 about negotiation. A photorealistic simulator costs GPU-hours and teaches
 nothing extra about agents reaching agreements, while a cheap grid runs a
 thousand episodes for the price of a coffee. The 3D sim is a demo feature — do
@@ -417,11 +432,11 @@ message.
 
 Keeping this list explicit is what keeps the project alive:
 
-- ❌ Any cloud anything before Phase 7
-- ❌ Docker before Phase 6
+- ❌ Any cloud anything before Phase 8
+- ❌ Docker before Phase 7
 - ❌ A2A before Phase 5 — homemade first, on purpose
 - ❌ A real simulator (CARLA, Gazebo, Isaac) — a text grid is enough for a long time
-- ❌ ROS 2 — valuable and career-relevant, but Phase 10+
+- ❌ ROS 2 — valuable and career-relevant, but Phase 11+
 - ❌ Real hardware
 - ❌ A web UI or visualizer — this is a reward, not a prerequisite
 - ❌ An optimal-solver baseline — nice eventually, not needed to start
@@ -434,7 +449,7 @@ Keeping this list explicit is what keeps the project alive:
 - **Phases 1–6:** model tokens only. A few dollars total, if that.
 - **Phases 7–9:** roughly **$0–5/month** in GCP. Cloud Run at zero traffic is
   free, Firestore and Pub/Sub at this volume are inside the free tier.
-- **Phase 10+:** model tokens dominate, driven by how often the eval suite runs.
+- **Phase 11+:** model tokens dominate, driven by how often the eval suite runs.
 
 **The real cost risk is eval cost, not infra cost.** Five agents × several
 rounds × 50 episodes is thousands of model calls per experiment. If one run
@@ -452,7 +467,7 @@ Metrics, established in Phase 2 and tracked forever after:
 - **Correctness** — did the genuinely more urgent robot go first?
 - **Efficiency** — messages exchanged per resolution.
 - **Deadlock rate** — from Phase 3, when movement is real.
-- **Honesty** — from Phase 10, when incentives are individual: how often does a
+- **Honesty** — from Phase 11, when incentives are individual: how often does a
   robot's claim about itself match its actual private state?
 
 Every metric is measured over **seeded, repeated** scenarios. LLM
@@ -532,7 +547,7 @@ Concentrated in the hardest parts:
 
 Agents act on natural language input, so a message from a peer can redirect
 behavior — **data becomes control**. Conceptually like SQL injection, but with
-no parameterized query to fall back on. Relevant from Phase 8, when three robots
+no parameterized query to fall back on. Relevant from Phase 9, when three robots
 are negotiating and one could in principle talk another into something. For this
 project that is either a vulnerability or the most interesting experiment on the
 list.
@@ -576,14 +591,14 @@ pool, no migrations.
 
 | Name | What it is | Used for |
 |---|---|---|
-| **Cloud Run Jobs** | Cloud Run for tasks that finish, not services that wait | Eval sweeps (Phase 10) |
-| **Pub/Sub** | A message queue — one publisher, many receivers | Broadcast announcements (Phase 8) |
-| **Secret Manager** | Somewhere for API keys that isn't source code | Phase 7 onward |
-| **Cloud Trace** | Timeline of what called what, and how long it took | Debugging negotiations (Phase 9) |
-| **Vertex AI** | Google's ML platform | Calling Claude from inside GCP (Phase 7) |
+| **Cloud Run Jobs** | Cloud Run for tasks that finish, not services that wait | Eval sweeps (Phase 11) |
+| **Pub/Sub** | A message queue — one publisher, many receivers | Broadcast announcements (Phase 9) |
+| **Secret Manager** | Somewhere for API keys that isn't source code | Phase 8 onward |
+| **Cloud Trace** | Timeline of what called what, and how long it took | Debugging negotiations (Phase 10) |
+| **Vertex AI** | Google's ML platform | Calling Claude from inside GCP (Phase 8) |
 | **Agent Engine** | Managed agent hosting — sessions, memory, scaling | Rejected, see D3 |
 | **GCE** | Plain rented VMs, billed by the hour | Only if a 3D simulator happens |
-| **IAM** | Who is allowed to call what | Per-agent service accounts (Phase 7) |
+| **IAM** | Who is allowed to call what | Per-agent service accounts (Phase 8) |
 
 **Before the first eval sweep:** set a billing budget alert (~$30). Infra costs
 a few dollars a month; the thing that bites is a runaway eval loop burning
@@ -649,7 +664,7 @@ as one thing:
 and, if there is a conflict, negotiates and commits to a plan — a small state
 machine with occasional model calls, not open-ended tool use. Adopting a
 framework to obtain a while-loop would buy someone else's opinions about memory
-in exchange for code we can write in an afternoon. Revisit at Phase 10 if robots
+in exchange for code we can write in an afternoon. Revisit at Phase 11 if robots
 start needing genuine multi-step tool use.
 
 ---

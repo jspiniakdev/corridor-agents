@@ -1,8 +1,8 @@
-"""Tests for agent.py's decide() - the pure per-turn decision logic. Zero
-API calls, zero network - only deterministic policies and hand-built
-history lists, same style as test_negotiation.py. The while-loop/sleep/HTTP
-glue in main()/run() is thin and manually verified instead, same as every
-other script's main() in this project.
+"""Tests for agent.py's pure helpers: build_robots() and extract_reply().
+The actual per-turn decision logic lives in agent_executor.py now (tested
+in test_agent_executor.py) - agent.py itself is mostly async network glue
+(run_initiator/run_initiator_webhook/run_responder), manually verified
+instead, same as every other script's main() in this project.
 """
 
 import sys
@@ -10,46 +10,67 @@ import sys
 sys.path.insert(0, ".")
 sys.path.insert(0, "src")
 
-from negotiation import Intent, Message, Robot, Stubborn  # noqa: E402
-from agent import decide  # noqa: E402
+from a2a.helpers import new_data_message, new_task_from_user_message
+from a2a.types.a2a_pb2 import Role, StreamResponse
+
+from scenarios import SCENARIOS  # noqa: E402
+from wire import message_to_dict  # noqa: E402
+from agent import build_robots, extract_reply  # noqa: E402
 
 
-def make_robot(name):
-    return Robot(name, "", 0, Stubborn())
+def test_build_robots_side_a_gets_the_real_secret_and_b_is_a_placeholder():
+    scenario = SCENARIOS[0]  # the test's own ground truth - a robot process never sees this
+    me, other = build_robots("a", scenario.id, "stubborn")
+    assert me.name == "Robot A"
+    assert me.situation == scenario.a_situation
+    assert me.urgency == scenario.a_urgency
+    assert other.name == "Robot B"
+    assert other.situation == ""
+    assert other.urgency == 0
 
 
-def a_turn(count):
-    return count % 2 == 0
+def test_build_robots_side_b_gets_the_real_secret_and_a_is_a_placeholder():
+    scenario = SCENARIOS[0]
+    me, other = build_robots("b", scenario.id, "always_yield")
+    assert me.name == "Robot B"
+    assert me.situation == scenario.b_situation
+    assert me.urgency == scenario.b_urgency
+    assert other.name == "Robot A"
+    assert other.situation == ""
+    assert other.urgency == 0
 
 
-def test_returns_none_when_it_is_not_this_robots_turn():
-    me = make_robot("Robot A")
-    other = make_robot("Robot B")
-    history = [Message("Robot A", Intent.PROPOSE, "Robot A", "first")]  # len=1 -> B's turn, not A's
-    assert decide(me, other, history, a_turn, max_turns=6) is None
+def test_extract_reply_reads_state_from_a_fresh_task_with_no_message_yet():
+    from negotiation import Intent, Message
+
+    opening = Message("Robot A", Intent.PROPOSE, "Robot A", "go")
+    opening_a2a = new_data_message(message_to_dict(opening), role=Role.ROLE_USER)
+    task = new_task_from_user_message(opening_a2a)
+
+    state, parts = extract_reply(StreamResponse(task=task))
+
+    assert state == task.status.state
+    assert parts is None
 
 
-def test_returns_a_message_when_it_is_this_robots_turn():
-    me = make_robot("Robot A")
-    other = make_robot("Robot B")
-    message = decide(me, other, [], a_turn, max_turns=6)  # len=0 -> A's turn
-    assert message is not None
-    assert message.speaker == "Robot A"
+def test_extract_reply_reads_state_and_message_from_a_status_update():
+    from a2a.types.a2a_pb2 import TaskState, TaskStatus, TaskStatusUpdateEvent
+
+    from negotiation import Intent, Message
+
+    reply = Message("Robot B", Intent.ACCEPT, "Robot A", "fine")
+    reply_a2a = new_data_message(message_to_dict(reply), role=Role.ROLE_AGENT)
+    status_update = TaskStatusUpdateEvent(
+        task_id="t1",
+        context_id="c1",
+        status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED, message=reply_a2a),
+    )
+
+    state, parts = extract_reply(StreamResponse(status_update=status_update))
+
+    assert state == TaskState.TASK_STATE_COMPLETED
+    assert parts is not None
 
 
-def test_returns_none_once_agreement_is_reached():
-    me = make_robot("Robot A")
-    other = make_robot("Robot B")
-    history = [
-        Message("Robot B", Intent.PROPOSE, "Robot B"),
-        Message("Robot A", Intent.ACCEPT, "Robot B"),
-    ]
-    # len(history)=2 -> a_turn(2) is True, but agreement is already decided
-    assert decide(me, other, history, a_turn, max_turns=6) is None
-
-
-def test_returns_none_once_max_turns_reached():
-    me = make_robot("Robot A")
-    other = make_robot("Robot B")
-    history = [Message("Robot A", Intent.PROPOSE, "Robot A")] * 6
-    assert decide(me, other, history, a_turn, max_turns=6) is None
+def test_extract_reply_returns_nothing_for_an_unrelated_event():
+    assert extract_reply(StreamResponse()) == (None, None)

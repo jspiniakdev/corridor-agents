@@ -23,22 +23,47 @@ other arrives - everything else resolves for free with zero LLM calls.
 `world_eval.py`/`experiments/world_cases.csv` batch-measure grid episodes,
 alongside `eval.py`/`experiments/cases.csv` (Phase 2) for plain negotiations.
 
-**Phase 4 complete.** Each robot runs as its own process (`agent.py`),
-negotiating over a deliberately dumb message board (`comms_server.py`) that
-has zero awareness of turns, agreement, or content — see D14. No central
-party ever makes a negotiation decision; each robot polls the shared history
-and independently computes its own turn (`len(history) % 2`) and checks
-agreement itself, using the same `negotiate()` building blocks unchanged.
+**Phase 4 complete** (superseded by Phase 5 - kept for history). Each robot
+ran as its own process negotiating over a deliberately dumb message board
+(`comms_server.py`). See D14.
 
-**Next: Phase 5 — A2A.** Replace the homemade HTTP board with the real
-protocol: agent cards, task lifecycle, push notifications. See `PLAN.md` §5,
-D2.
+**Phase 5 complete.** Real A2A, peer to peer - `comms_server.py` is gone,
+there's no third process at all anymore. Each `agent.py` process is either
+a pure A2A client (`--side a`, the initiator, dials out) or a pure A2A
+server (`--side b`, the responder, hosting
+`agent_executor.NegotiationExecutor`). One negotiation is one A2A task;
+`negotiation.py` is completely unchanged - only the transport around it
+did. Three things got built this phase: plain request/response (agent
+cards + task lifecycle, verified against `run.py`'s baseline exactly),
+streaming (a `TASK_STATE_WORKING` heartbeat so a slow peer doesn't look
+like a dead one), and webhooks (`--webhook`: the initiator registers a
+callback and stops holding the connection open - the one piece that makes
+Robot A a server too, not just a client). See D15.
+
+**Phase 6 complete.** The world is a real MCP server (`world_server.py`) -
+`get_map()`, `get_observation(side)`, `propose_action(side, action)`.
+`world.py`/`simulate.py` are completely untouched - `world_server.py`
+reuses their `WorldState`/`reactive_filter`/`apply` directly rather than
+duplicating the safety-critical logic. `agent.py --world-url` makes a
+robot also move through the grid, negotiating only once its own
+observation says it's at the boundary and can sense the other robot
+(matching Phase 3's original physical logic, D12) - `--side a` stays the
+fixed initiator this phase, same as Phase 5. `propose_action` is
+synchronous, no independent clock - the world's authority narrows to
+exactly the one thing no single robot can safely decide alone: is it
+safe to enter the shared corridor zone right now. See D17.
+
+**Next: boundary-triggered dynamic initiation** (either robot can become
+the initiator based on its own observation, with jitter + a name tiebreak
+for the race case) **and the visualizer rebuild** - both deliberately
+deferred out of Phase 6, their own follow-on plans. After that, Phase 7 —
+containers (Docker + Compose). See `PLAN.md` §5.
 
 ## How to run things
 
 ```bash
 source .venv/bin/activate        # Python 3.13; required in each new shell
-python -m pytest tests/ -q       # 67 tests, no API calls, ~0.03s
+python -m pytest tests/ -q       # 79 tests, no API calls, ~0.03s
 python run.py                    # one negotiation, deterministic policies
 python run.py --a llm --b llm    # needs: cp .env.example .env && source .env
 python eval.py                   # measurement sweep, deterministic cases only
@@ -47,12 +72,20 @@ python simulate.py               # one grid episode, deliberate, deterministic
 python simulate.py --no-deliberate --a llm --b llm  # FCFS baseline vs. negotiation
 python world_eval.py             # grid-episode measurement sweep, free cases only
 python world_eval.py --full      # also runs the deliberate llm-involving cases
-python visualize.py              # tick-by-tick HTML replay of one episode
+python visualize.py              # tick-by-tick HTML replay of one episode (Phase 3 grid only)
 
-# Phase 4: three terminals, same --scenario in each (nothing checks that for you)
-python comms_server.py --port 8000
-python agent.py --scenario <id> --side a --policy stubborn --comms-url http://localhost:8000
-python agent.py --scenario <id> --side b --policy always_yield --comms-url http://localhost:8000
+# Phase 5: negotiation only, two terminals, same --scenario in each
+python agent.py --scenario <id> --side b --policy always_yield --port 9001
+python agent.py --scenario <id> --side a --policy stubborn --peer-url http://127.0.0.1:9001
+
+# same, but the initiator doesn't hold the connection open - it registers a
+# callback and waits to be called back instead:
+python agent.py --scenario <id> --side a --policy stubborn --peer-url http://127.0.0.1:9001 --webhook
+
+# Phase 6: three terminals - the world, then both robots, --world-url in both
+python world_server.py --port 9500
+python agent.py --scenario <id> --side b --policy always_yield --port 9001 --world-url http://127.0.0.1:9500/mcp
+python agent.py --scenario <id> --side a --policy stubborn --peer-url http://127.0.0.1:9001 --world-url http://127.0.0.1:9500/mcp
 ```
 
 ## The one design principle
@@ -70,7 +103,11 @@ fix is almost always to take information *away* from someone.
   prose commentary and must never carry the decision, or rule-based policies
   can't participate.
 - **Ground truth stays hidden.** `Scenario.urgency` must never reach a prompt.
-  There is a test asserting this — keep it passing.
+  There is a test asserting this — keep it passing. A networked robot process
+  (`agent.py`) must never hold the full `Scenario` either — only
+  `scenarios.for_side()`'s own-half slice (D16). Only the in-process tools
+  (`run.py`/`eval.py`/`simulate.py`/`world_eval.py`) legitimately need both
+  halves, to score correctness.
 - **Latency is designed for the slow case.** Timeouts and retries assume
   LLM-speed responses even when tests use microsecond stubs.
 - Prefer boring stdlib code. New dependencies need a reason.

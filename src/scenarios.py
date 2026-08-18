@@ -90,3 +90,17 @@ SCENARIOS = [
 ]
 
 BY_ID = {s.id: s for s in SCENARIOS}
+
+
+def for_side(scenario_id: str, side: str) -> tuple[str, int]:
+    """The one thing a networked robot process (agent.py) is allowed to
+    load: its own situation and urgency, nothing else about the paired
+    scenario. The full Scenario - both halves plus should_go_first -
+    stays inside the in-process tools (run.py/eval.py/simulate.py/
+    world_eval.py), which legitimately need it to score correctness.
+    Real robots don't get a pointer to the whole scenario file; they get
+    their own briefing."""
+    scenario = BY_ID[scenario_id]
+    if side == "a":
+        return scenario.a_situation, scenario.a_urgency
+    return scenario.b_situation, scenario.b_urgency
