@@ -29,6 +29,8 @@ import time
 
 sys.path.insert(0, "src")
 
+import tracing  # noqa: E402 - Phase 10a, no-op unless --trace calls tracing.setup()
+
 from negotiation import POLICIES, LLMPolicy, Robot, check_agreement  # noqa: E402
 from observation import compose_observation_from_dict  # noqa: E402
 from scenarios import BY_ID, for_side  # noqa: E402
@@ -172,48 +174,50 @@ async def run_initiator(me, other, peer_url, max_turns, auth=False):
     task_id = None
     context_id = None
 
-    while True:
-        if check_agreement(history) is not None or len(history) >= max_turns:
-            return report_outcome(me, history, max_turns), history, message_times
+    with tracing.span("negotiation.episode", role="initiator", robot=me.name, peer=peer_url):
+        while True:
+            if check_agreement(history) is not None or len(history) >= max_turns:
+                return report_outcome(me, history, max_turns), history, message_times
 
-        my_message = me.policy.respond(me, other, history, max_turns)
-        print(f"  {my_message}")
-        history.append(my_message)
-        message_times.append(time.time())
+            with tracing.span("negotiation.turn", turn=len(history)):
+                my_message = me.policy.respond(me, other, history, max_turns)
+                print(f"  {my_message}")
+                history.append(my_message)
+                message_times.append(time.time())
 
-        a2a_message = new_data_message(
-            message_to_dict(my_message),
-            role=Role.ROLE_USER,
-            task_id=task_id,
-            context_id=context_id,
-        )
-        request = SendMessageRequest(message=a2a_message)
+                a2a_message = new_data_message(
+                    message_to_dict(my_message),
+                    role=Role.ROLE_USER,
+                    task_id=task_id,
+                    context_id=context_id,
+                )
+                request = SendMessageRequest(message=a2a_message)
 
-        final_state = None
-        peer_reply_parts = None
-        async for response in client.send_message(request):
-            if response.HasField("task"):
-                task_id = response.task.id
-                context_id = response.task.context_id
-            state, parts = extract_reply(response)
-            if state == TaskState.TASK_STATE_WORKING:
-                # the streaming heartbeat - peer is alive and thinking,
-                # not silent because it's down
-                print(f"  ({other.name} is working...)")
-                continue
-            if state is not None:
-                final_state = state
-            if parts is not None:
-                peer_reply_parts = parts
+                final_state = None
+                peer_reply_parts = None
+                async for response in client.send_message(request):
+                    if response.HasField("task"):
+                        task_id = response.task.id
+                        context_id = response.task.context_id
+                    state, parts = extract_reply(response)
+                    if state == TaskState.TASK_STATE_WORKING:
+                        # the streaming heartbeat - peer is alive and thinking,
+                        # not silent because it's down
+                        print(f"  ({other.name} is working...)")
+                        continue
+                    if state is not None:
+                        final_state = state
+                    if parts is not None:
+                        peer_reply_parts = parts
 
-        if peer_reply_parts is not None:
-            peer_reply = message_from_dict(get_data_parts(peer_reply_parts)[0])
-            print(f"  {peer_reply}")
-            history.append(peer_reply)
-            message_times.append(time.time())
+                if peer_reply_parts is not None:
+                    peer_reply = message_from_dict(get_data_parts(peer_reply_parts)[0])
+                    print(f"  {peer_reply}")
+                    history.append(peer_reply)
+                    message_times.append(time.time())
 
-        if final_state == TaskState.TASK_STATE_COMPLETED:
-            return report_outcome(me, history, max_turns), history, message_times
+            if final_state == TaskState.TASK_STATE_COMPLETED:
+                return report_outcome(me, history, max_turns), history, message_times
 
 
 async def run_initiator_webhook(me, other, peer_url, webhook_port, max_turns, host="0.0.0.0", auth=False):
@@ -383,6 +387,7 @@ def build_responder_app(me, other, port, max_turns, on_resolved=None, on_task_st
         push_sender=push_sender,
     )
     app = FastAPI()
+    tracing.instrument_fastapi(app)  # Phase 10a - extracts the caller's traceparent; no-op unless --trace ran
     add_a2a_routes_to_fastapi(
         app,
         agent_card_routes=create_agent_card_routes(card),
@@ -719,12 +724,28 @@ def main():
         default="global",
         help="Vertex AI region for --vertex (default: global, Vertex's own recommended region for Claude - not necessarily the region Cloud Run itself runs in)",
     )
+    parser.add_argument(
+        "--trace",
+        action="store_true",
+        help="Phase 10a/D35: emit OpenTelemetry spans for the negotiation - episode, per-turn, per-LLM-call, and (on the responder) per handled message, linked into one trace across both robot processes. Off by default. Exporter from OTEL_TRACES_EXPORTER: console (default) or gcp (Cloud Trace).",
+    )
     args = parser.parse_args()
 
     if args.vertex and not args.vertex_project:
         parser.error("--vertex requires --vertex-project")
     vertex = (args.vertex_project, args.vertex_region) if args.vertex else None
 
+    if args.trace:
+        tracing.setup(f"robot-{args.side}", args.scenario)
+
+    try:
+        return _run(args, vertex)
+    finally:
+        if args.trace:
+            tracing.shutdown()
+
+
+def _run(args, vertex):
     me, other = build_robots(args.side, args.scenario, args.policy, vertex=vertex)
 
     if args.world_url:

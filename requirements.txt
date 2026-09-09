@@ -21,3 +21,12 @@ mcp>=2.0.0
 # Already pulled in transitively (a2a-sdk/mcp use it); declared directly since
 # agent.py now imports it itself.
 google-auth>=2.30
+
+# Phase 10a: OpenTelemetry tracing for the negotiation path (docs/PLAN.md §5,
+# Phase 10 / D35). Only imported when agent.py --trace is passed - src/tracing.py
+# is a stdlib-only no-op otherwise. exporter-gcp-trace is the Cloud Trace target
+# for the deployed path (10b); console is the default locally.
+opentelemetry-sdk>=1.44
+opentelemetry-instrumentation-httpx>=0.65b0
+opentelemetry-instrumentation-fastapi>=0.65b0
+opentelemetry-exporter-gcp-trace>=1.15

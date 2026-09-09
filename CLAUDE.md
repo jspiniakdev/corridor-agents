@@ -214,17 +214,38 @@ Manager to protect - it would be infra for a secret that no longer exists in
 the cloud deployment. Local/Compose keep `ANTHROPIC_API_KEY` via `.env`,
 unchanged.
 
-**Next:** a live Vertex smoke test (confirm the model call actually works
-against project `corridor-agents`), then redeploy `robot-a`/`robot-b` with
-`--vertex --vertex-project corridor-agents` to close out Phase 8. After
-that, **Phase 9 — three or more robots** (Pub/Sub, Firestore). See
-`PLAN.md` §5.
+**Phase 10a done (D35): OpenTelemetry tracing on the negotiation path.**
+`agent.py --trace` (off by default) emits four semantic spans -
+`negotiation.episode` → `negotiation.turn` → `llm.respond` (model, token
+counts, stop reason) on the initiator, `negotiation.handle` on the
+responder - plus a2a-sdk's own built-in task-lifecycle spans, which appear
+for free once there's a `TracerProvider`. `src/tracing.py` is a
+stdlib-only no-op until `--trace`, so `run.py`/`eval.py`/tests pay nothing.
+Cross-process linking verified: the initiator's `POST` span is the parent
+of the responder's `POST /` span, one connected trace across both robot
+processes. Exporter from `OTEL_TRACES_EXPORTER` (`console` default, `gcp`
+for Cloud Trace). **10b (deferred, bundled with the Cloud Run redeploy):**
+tracing the MCP world path + `--webhook` initiator, live Cloud Trace
+verification, and **Option C** - moving the world to the cloud properly
+(Firestore-backed `WorldState`, replacing `world_server.py`'s in-memory
+singleton).
+
+**Phase 9 (three or more robots) is deliberately skipped for now** - it's
+a `world.py` rewrite plus a real N-way-negotiation design fork, and the
+discovery/broadcast half (Firestore registry, Pub/Sub) only earns its keep
+at 3+ robots. Staying at 2 robots.
+
+**Next:** a live Vertex smoke test (confirm the model call works against
+project `corridor-agents` - **blocked on a GCP quota increase**, auto-denied
+on the fresh project, support ticket open), then redeploy `robot-a`/
+`robot-b` with `--vertex` + `--trace` (`OTEL_TRACES_EXPORTER=gcp`) to close
+out Phase 8 and 10b together. See `PLAN.md` §5.
 
 ## How to run things
 
 ```bash
 source .venv/bin/activate        # Python 3.13; required in each new shell
-python -m pytest tests/ -q       # 105 tests, no API calls, ~0.03s
+python -m pytest tests/ -q       # 109 tests, no API calls, ~0.03s
 python run.py                    # one negotiation, deterministic policies
 python run.py --a llm --b llm    # needs: cp .env.example .env && source .env
 python eval.py                   # measurement sweep, deterministic cases only
@@ -290,6 +311,14 @@ docker compose down               # when actually done
 # application-default login) and a project with Vertex AI enabled.
 # NOT YET LIVE-VERIFIED - this is the smoke test to run before trusting it.
 python agent.py --scenario <id> --side a --policy llm --vertex --vertex-project corridor-agents --peer-url http://127.0.0.1:9001
+
+# Phase 10a/D35: add --trace to BOTH sides for OpenTelemetry spans of the
+# negotiation (episode/turn/llm.respond on the initiator, handle on the
+# responder, plus a2a-sdk's own spans). Console by default - noisy but real;
+# set OTEL_TRACES_EXPORTER=gcp for Cloud Trace (10b). Off by default costs
+# nothing (src/tracing.py is a stdlib no-op).
+python agent.py --scenario <id> --side b --policy always_yield --port 9001 --trace
+python agent.py --scenario <id> --side a --policy stubborn --peer-url http://127.0.0.1:9001 --trace
 
 # Phase 8 (D33): real Cloud Run - robot-b as a Service (always listening),
 # robot-a as a Job (one-shot: dial, negotiate, exit). Needs gcloud CLI,

@@ -23,6 +23,8 @@ from a2a.server.events import EventQueue  # noqa: E402
 from a2a.server.tasks import TaskUpdater  # noqa: E402
 from a2a.types.a2a_pb2 import Role  # noqa: E402
 
+import tracing  # noqa: E402 - Phase 10a, no-op unless agent.py --trace ran
+
 from negotiation import check_agreement  # noqa: E402
 from wire import message_from_dict, message_to_dict  # noqa: E402
 
@@ -85,7 +87,13 @@ class NegotiationExecutor(AgentExecutor):
         self.message_times = []  # D29 - real time.time() per history entry, index-parallel
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        with tracing.span("negotiation.handle", robot=self.me.name) as s:
+            await self._execute(context, event_queue, s)
+
+    async def _execute(self, context, event_queue, span) -> None:
         is_new_task = context.current_task is None
+        if span is not None:
+            span.set_attribute("negotiation.new_task", is_new_task)
         task, history = history_from_context(context)
         if is_new_task:
             await event_queue.enqueue_event(task)

@@ -1504,3 +1504,19 @@ Paired with this: **Secret Manager is deliberately not being added.** The only s
 **Not yet done:** a live call against the real Vertex API hasn't been made yet - `LLMPolicy`'s vertex-mode construction is unit-tested (right client class, fails fast without a project), but the actual model call, the exact behavior of `region="global"`, and a redeploy of `robot-a`/`robot-b` with `--vertex` are still open. Verify live before treating Phase 8 as closed.
 
 **Would change our mind:** if a future deployment target (Bedrock, Foundry, or a second GCP project) needs its own client class, the same `use_vertex`-style boolean-plus-config pattern on `LLMPolicy` extends directly - no rework, just another branch in `.client`.
+
+## D35 — Phase 10a: OpenTelemetry tracing on the negotiation path, flag-gated
+
+**Decided:** `agent.py --trace` (off by default, same shape as `--auth`/`--vertex`) turns on OpenTelemetry for the process. A new `src/tracing.py` is the seam: `span(name, **attrs)` is a stdlib-only no-op context manager until `tracing.setup()` runs, so `run.py`/`eval.py`/`simulate.py`/the test suite - none of which pass `--trace` - import it for free and pay nothing. Only `agent.py`'s `main()` calls `setup()`; `negotiation.py` (imported everywhere) calls `span()` around the LLM request, which is why the no-op default has to be genuinely zero-cost.
+
+Four semantic spans, the readable layer: `negotiation.episode` (initiator, per run) → `negotiation.turn` (per exchange) → `llm.respond` (per model call, with `model`/`vertex`/`llm.input_tokens`/`llm.output_tokens`/`llm.stop_reason`); and on the responder, `negotiation.handle` per incoming message. Every span carries `corridor.scenario`.
+
+**Cross-process linking works** and is the whole point: `setup()` calls `HTTPXClientInstrumentor().instrument()` (patches the httpx client class, so it covers both the a2a-sdk peer calls and - later, 10b - the mcp world calls), and `build_responder_app()` calls `tracing.instrument_fastapi(app)` to extract the incoming `traceparent`. Verified live with a 2-robot run: the initiator's `POST` span is the direct parent of the responder's `POST /` span, so `negotiation.episode` → `negotiation.turn` → (initiator `POST`) → (responder `POST /`) → `negotiation.handle` is one connected trace across both processes.
+
+**Bonus, not planned:** a2a-sdk ships its own OpenTelemetry instrumentation. The moment there's a `TracerProvider`, its full task-lifecycle spans (`EventQueueSource.*`, `JsonRpcDispatcher.*`, `DefaultRequestHandler.*`) appear for free - deep protocol visibility, exactly Phase 10's goal, with our four spans as the semantic index on top. The console exporter makes ~50 spans/exchange look like a wall; a real trace UI (Cloud Trace, 10b) renders it as one collapsible tree.
+
+**Exporter** from the standard `OTEL_TRACES_EXPORTER` env var rather than a bespoke flag: `console` (default, dev) or `gcp` (`CloudTraceSpanExporter`, for 10b's deployed path). `SimpleSpanProcessor`, not `BatchSpanProcessor` - a negotiation is a handful of our spans, the initiator is a short-lived process, and a signal-killed responder would strand a batch queue at exit (found this the hard way - the first run's responder emitted nothing).
+
+**Scope - what 10a deliberately does NOT trace, deferred to 10b:** the MCP world path (`world_server.py`, `run_robot`'s `--world-url` loop), the `--webhook` initiator variant, and live Cloud Trace verification in the deployed environment. All three are bundled with 10b's Cloud Run redeploy (itself waiting on the Vertex quota, D34). The `--webhook` *responder* is already covered - it shares `build_responder_app()`.
+
+**Would change our mind:** if the a2a-sdk auto-instrumentation noise becomes a real problem for local console debugging, add a span processor that filters by instrumentation scope - but not before it actually gets in the way, and never for the `gcp` path where the UI collapses it anyway.

@@ -22,6 +22,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Protocol
 
+import tracing  # Phase 10a - a no-op until agent.py --trace calls tracing.setup()
+
 
 # ---------------------------------------------------------------------------
 # Messages
@@ -221,14 +223,21 @@ class LLMPolicy:
         turns_left = max_turns - len(history)
         system_prompt = SYSTEM.format(name=me.name, other=other.name, situation=me.situation, turns_left=turns_left)
 
-        reply = self.client.messages.create(
-            model=self.model,
-            max_tokens=300,
-            system=system_prompt,
-            messages=messages,
-            tools=[self._tool(me.name, other.name)],
-            tool_choice={"type": "tool", "name": "respond"},
-        )
+        with tracing.span("llm.respond", robot=me.name, model=self.model, vertex=self.use_vertex, turn=len(history)) as s:
+            reply = self.client.messages.create(
+                model=self.model,
+                max_tokens=300,
+                system=system_prompt,
+                messages=messages,
+                tools=[self._tool(me.name, other.name)],
+                tool_choice={"type": "tool", "name": "respond"},
+            )
+            if s is not None:
+                usage = getattr(reply, "usage", None)
+                if usage is not None:
+                    s.set_attribute("llm.input_tokens", usage.input_tokens)
+                    s.set_attribute("llm.output_tokens", usage.output_tokens)
+                s.set_attribute("llm.stop_reason", reply.stop_reason or "")
         raw_line = f"[LLM raw] {me.name}: {reply.content}"
         print(raw_line)  # debugging: the exact reply from the model
         self._log(raw_line)
