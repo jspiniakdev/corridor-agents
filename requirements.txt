@@ -5,6 +5,11 @@
 anthropic[vertex]>=0.40
 pytest>=8.0
 
+# Phase 8/D36: GeminiPolicy - Claude's negotiation policy, reimplemented against
+# a different provider (Gemini via Vertex) to prove D7's "policy is pluggable"
+# holds across model providers. Only imported when --policy gemini is used.
+google-genai>=1.0
+
 # Phase 4: real HTTP between separate processes (docs/PLAN.md §5, D2).
 fastapi>=0.115
 uvicorn>=0.30

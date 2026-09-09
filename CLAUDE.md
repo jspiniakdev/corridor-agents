@@ -205,8 +205,25 @@ default: local venv/Compose are unchanged. Model IDs need no translation for
 Sonnet 5 (current-generation Vertex models use the bare first-party ID, not
 a dated `@` suffix); `--vertex-region` defaults to `"global"`, Vertex's own
 recommended region. **Not yet live-verified against the real Vertex API or
-redeployed to Cloud Run** - construction is unit-tested, but an actual
-model call needs a real smoke test first.
+redeployed to Cloud Run** - the `anthropic-claude-sonnet` Vertex quota is 0
+on this fresh project and the increase was auto-denied (support ticket
+open); construction is unit-tested.
+
+**GeminiPolicy added (D36): the negotiation policy, reimplemented against a
+second provider.** `--policy gemini` runs Claude's exact negotiation
+contract against Gemini via Vertex (`google-genai`, ADC auth), reusing
+`--vertex-project`/`--vertex-region` + a new `--gemini-model` (default
+`gemini-2.5-flash`). Shared unchanged: the `SYSTEM` prompt,
+`message_from_tool_call()`, `_log_raw()`, the `llm.respond` span, and the
+entire negotiation loop / executor / wire / world integration. Provider-
+specific and nothing else: SDK, tool-schema dialect, forced-tool-use knob,
+roles, response shape, token-count fields. This is D7 taken one step
+further (an agent isn't tied to a *provider* either) and it de-risks D34's
+Bedrock/Foundry "would change our mind" clause. **Verified live** - real
+Gemini negotiation, correct outcome, `provider=gemini` on the trace span.
+Bonus: Gemini's Vertex quota *is* non-zero here, so `--policy gemini` is a
+working way to exercise the full deployed pipeline (10b) while the Claude
+quota is stuck.
 
 **Secret Manager: deliberately dropped, not forgotten.** Once Cloud Run
 agents use `--vertex`, there's no API key left on that path for Secret
@@ -245,7 +262,7 @@ out Phase 8 and 10b together. See `PLAN.md` §5.
 
 ```bash
 source .venv/bin/activate        # Python 3.13; required in each new shell
-python -m pytest tests/ -q       # 109 tests, no API calls, ~0.03s
+python -m pytest tests/ -q       # 113 tests, no API calls, ~0.03s
 python run.py                    # one negotiation, deterministic policies
 python run.py --a llm --b llm    # needs: cp .env.example .env && source .env
 python eval.py                   # measurement sweep, deterministic cases only
@@ -309,8 +326,15 @@ docker compose down               # when actually done
 # --policy llm side calls Claude via Vertex AI instead of the direct API -
 # no .env/API key needed, just real GCP credentials (gcloud auth
 # application-default login) and a project with Vertex AI enabled.
-# NOT YET LIVE-VERIFIED - this is the smoke test to run before trusting it.
+# BLOCKED: the anthropic-claude-sonnet Vertex quota is 0 on this project.
 python agent.py --scenario <id> --side a --policy llm --vertex --vertex-project corridor-agents --peer-url http://127.0.0.1:9001
+
+# Phase 8/D36: --policy gemini - Claude's negotiation policy, run against
+# Gemini via Vertex (google-genai, ADC auth, no API key). Works today
+# (Gemini's Vertex quota is non-zero, unlike Claude's). Add --trace on both
+# sides to see provider=gemini on the llm.respond span.
+python agent.py --scenario <id> --side b --policy always_yield --port 9001
+python agent.py --scenario <id> --side a --policy gemini --vertex-project corridor-agents --peer-url http://127.0.0.1:9001
 
 # Phase 10a/D35: add --trace to BOTH sides for OpenTelemetry spans of the
 # negotiation (episode/turn/llm.respond on the initiator, handle on the
@@ -351,9 +375,12 @@ fix is almost always to take information *away* from someone.
 
 ## Conventions that matter
 
-- **Policy is pluggable** (D7). Anything that assumes an agent is an LLM is a
-  bug. Deterministic policies must stay first-class — they're the baselines, the
-  test fixtures, and the adversaries.
+- **Policy is pluggable** (D7, extended by D36). Anything that assumes an agent
+  is an LLM is a bug — and anything that assumes a *specific LLM provider* is
+  too: `LLMPolicy` (Claude) and `GeminiPolicy` (Gemini) share the prompt,
+  `message_from_tool_call()`, and the trace span; only the SDK/schema/response
+  shape differ. Deterministic policies must stay first-class — they're the
+  baselines, the test fixtures, and the adversaries.
 - **Messages are structured.** The decision lives in `goes_first`; `text` is
   prose commentary and must never carry the decision, or rule-based policies
   can't participate.

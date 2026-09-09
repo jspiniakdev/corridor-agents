@@ -12,12 +12,14 @@ sys.path.insert(0, "src")
 
 from negotiation import (  # noqa: E402
     AlwaysYield,
+    GeminiPolicy,
     Intent,
     LLMPolicy,
     Message,
     NeverYield,
     Robot,
     Stubborn,
+    message_from_tool_call,
     negotiate,
 )
 from scenarios import SCENARIOS  # noqa: E402
@@ -103,18 +105,27 @@ def test_llm_tool_schema_scopes_goes_first_to_this_negotiation():
     assert schema["input_schema"]["properties"]["goes_first"]["enum"] == [a.name, b.name, None]
 
 
-def test_llm_builds_message_from_tool_input():
+def test_tool_call_maps_to_message_provider_agnostically():
     a, b = make(Stubborn, Stubborn)
-    msg = LLMPolicy._to_message(a, b, {"intent": "propose", "goes_first": "Robot B", "text": "You go."})
+    msg = message_from_tool_call(a, b, {"intent": "propose", "goes_first": "Robot B", "text": "You go."})
     assert msg.intent is Intent.PROPOSE
     assert msg.goes_first == "Robot B"
 
 
-def test_llm_drops_hallucinated_goes_first_name():
+def test_tool_call_drops_hallucinated_goes_first_name():
     """Belt and suspenders: the schema's enum should make this impossible,
-    but a name outside this negotiation still must not be trusted."""
+    but a name outside this negotiation still must not be trusted - and
+    both providers route through here."""
     a, b = make(Stubborn, Stubborn)
-    msg = LLMPolicy._to_message(a, b, {"intent": "propose", "goes_first": "Robot Q", "text": "hi"})
+    msg = message_from_tool_call(a, b, {"intent": "propose", "goes_first": "Robot Q", "text": "hi"})
+    assert msg.goes_first is None
+
+
+def test_tool_call_missing_goes_first_is_none():
+    """GeminiPolicy's schema leaves goes_first optional (nullable, not a
+    required enum member) - a call without it must still parse."""
+    a, b = make(Stubborn, Stubborn)
+    msg = message_from_tool_call(a, b, {"intent": "inform", "text": "thinking"})
     assert msg.goes_first is None
 
 
@@ -137,6 +148,30 @@ def test_llm_vertex_client_is_anthropic_vertex_not_the_direct_api():
     from anthropic import AnthropicVertex
 
     assert isinstance(policy.client, AnthropicVertex)
+
+
+def test_gemini_requires_a_project():
+    """Phase 8/D36: same fail-fast contract as LLMPolicy(use_vertex=True)."""
+    with pytest.raises(ValueError):
+        GeminiPolicy(None)
+
+
+def test_gemini_tool_schema_scopes_goes_first_to_this_negotiation():
+    a, b = make(Stubborn, Stubborn)
+    tool = GeminiPolicy._tool(a.name, b.name)
+    schema = tool.function_declarations[0].parameters_json_schema
+    assert schema["properties"]["goes_first"]["enum"] == [a.name, b.name]
+    assert schema["properties"]["intent"]["enum"] == [i.value for i in Intent]
+
+
+def test_gemini_client_is_a_vertex_genai_client():
+    """genai.Client(vertexai=True, ...) construction doesn't touch the
+    network - only the client type/mode is under test."""
+    policy = GeminiPolicy("corridor-agents", "global", "gemini-2.5-flash")
+    from google import genai
+
+    assert isinstance(policy.client, genai.Client)
+    assert policy.client.vertexai is True
 
 
 def test_every_scenario_is_well_formed():
