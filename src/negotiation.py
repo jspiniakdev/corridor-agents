@@ -151,18 +151,39 @@ the same value they used). Talk like a machine in a hurry, not a chatbot."""
 
 
 class LLMPolicy:
-    """Asks Claude. The only policy that costs money or takes seconds."""
+    """Asks Claude. The only policy that costs money or takes seconds.
 
-    def __init__(self, model: str = MODEL):
+    Defaults to the direct Anthropic API (a plain API key). Pass
+    use_vertex=True (Phase 8/D34) to instead call Claude via Vertex AI -
+    the shape Cloud Run deploys use, authenticating as the calling
+    process's own GCP identity (ADC/impersonation) with no API key
+    involved at all. vertex_project is required when use_vertex is True;
+    vertex_region defaults to "global", Vertex's own recommended region
+    for Claude. Model IDs need no translation between the two APIs for a
+    current-generation model like Sonnet 5 - only dated-snapshot models
+    differ, taking an "@YYYYMMDD" suffix on Vertex - so `model` is passed
+    straight through either way."""
+
+    def __init__(self, model: str = MODEL, use_vertex: bool = False, vertex_project: str | None = None, vertex_region: str = "global"):
         self.model = model
+        self.use_vertex = use_vertex
+        self.vertex_project = vertex_project
+        self.vertex_region = vertex_region
+        if use_vertex and not vertex_project:
+            raise ValueError("LLMPolicy(use_vertex=True) requires vertex_project")
         self._client = None
 
     @property
     def client(self):
         if self._client is None:
-            import anthropic  # imported lazily so the rest runs without the SDK
+            if self.use_vertex:
+                from anthropic import AnthropicVertex  # imported lazily, same reason as below
 
-            self._client = anthropic.Anthropic()
+                self._client = AnthropicVertex(project_id=self.vertex_project, region=self.vertex_region)
+            else:
+                import anthropic  # imported lazily so the rest runs without the SDK
+
+                self._client = anthropic.Anthropic()
         return self._client
 
     @staticmethod

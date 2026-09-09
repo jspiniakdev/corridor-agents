@@ -1,5 +1,8 @@
 # Phase 1. Deliberately short - see docs/PLAN.md §7 for what we're NOT adding yet.
-anthropic>=0.40
+# [vertex] extra (Phase 8/D34) pulls in AnthropicVertex - already satisfied
+# transitively by google-auth below, but declared explicitly so the intent
+# to support Vertex is on record, not an accident of another dependency.
+anthropic[vertex]>=0.40
 pytest>=8.0
 
 # Phase 4: real HTTP between separate processes (docs/PLAN.md §5, D2).

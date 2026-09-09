@@ -6,6 +6,8 @@ machinery is testable with deterministic policies before a single token is spent
 
 import sys
 
+import pytest
+
 sys.path.insert(0, "src")
 
 from negotiation import (  # noqa: E402
@@ -114,6 +116,27 @@ def test_llm_drops_hallucinated_goes_first_name():
     a, b = make(Stubborn, Stubborn)
     msg = LLMPolicy._to_message(a, b, {"intent": "propose", "goes_first": "Robot Q", "text": "hi"})
     assert msg.goes_first is None
+
+
+def test_llm_defaults_to_direct_api():
+    policy = LLMPolicy()
+    assert policy.use_vertex is False
+
+
+def test_llm_vertex_requires_a_project():
+    """Phase 8/D34: fail fast at construction, not on the first real call,
+    if --vertex was set without --vertex-project."""
+    with pytest.raises(ValueError):
+        LLMPolicy(use_vertex=True)
+
+
+def test_llm_vertex_client_is_anthropic_vertex_not_the_direct_api():
+    """No network call, no credentials needed - AnthropicVertex's __init__
+    doesn't touch the network, only .client's *type* is under test here."""
+    policy = LLMPolicy(use_vertex=True, vertex_project="corridor-agents", vertex_region="global")
+    from anthropic import AnthropicVertex
+
+    assert isinstance(policy.client, AnthropicVertex)
 
 
 def test_every_scenario_is_well_formed():

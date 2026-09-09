@@ -29,7 +29,7 @@ import time
 
 sys.path.insert(0, "src")
 
-from negotiation import POLICIES, Robot, check_agreement  # noqa: E402
+from negotiation import POLICIES, LLMPolicy, Robot, check_agreement  # noqa: E402
 from observation import compose_observation_from_dict  # noqa: E402
 from scenarios import BY_ID, for_side  # noqa: E402
 from wire import history_to_list, message_from_dict, message_to_dict  # noqa: E402
@@ -39,18 +39,29 @@ from agent_executor import NegotiationExecutor  # noqa: E402
 POLL_INTERVAL_SECONDS = 1.0  # D30: how often a robot checks in with the world - governs movement, waiting, and negotiation-trigger cadence uniformly, not a separate "how long does moving take" model. Slept BEFORE each check-in (top of run_robot()'s loop), not after - so the first check-in is paced too, not a free instant action exempt from the interval.
 
 
-def build_robots(side, scenario_id, policy_name):
+def _build_policy(policy_name, vertex):
+    """POLICIES[name]() for every policy except llm-with---vertex, which
+    needs constructor args the POLICIES dict's zero-arg lookup can't
+    carry. vertex, when given, is (project, region) from agent.py's
+    --vertex-project/--vertex-region (Phase 8/D34)."""
+    if policy_name == "llm" and vertex is not None:
+        project, region = vertex
+        return LLMPolicy(use_vertex=True, vertex_project=project, vertex_region=region)
+    return POLICIES[policy_name]()
+
+
+def build_robots(side, scenario_id, policy_name, vertex=None):
     """Only ever loads this robot's own situation/urgency via for_side() -
     never the paired Scenario object - so this process's own state (me,
     other) can't accidentally end up holding the other robot's secret.
     See D16."""
     if side == "a":
         situation, urgency = for_side(scenario_id, "a")
-        me = Robot("Robot A", situation, urgency, POLICIES[policy_name]())
+        me = Robot("Robot A", situation, urgency, _build_policy(policy_name, vertex))
         other = Robot("Robot B", "", 0)  # placeholder only - real secret never held here
     else:
         situation, urgency = for_side(scenario_id, "b")
-        me = Robot("Robot B", situation, urgency, POLICIES[policy_name]())
+        me = Robot("Robot B", situation, urgency, _build_policy(policy_name, vertex))
         other = Robot("Robot A", "", 0)
     return me, other
 
@@ -697,9 +708,24 @@ def main():
         action="store_true",
         help="Phase 8/D33: fetch a real OIDC ID token (audience = peer_url) and attach it as Authorization: Bearer on every outbound A2A call - needed to call a Cloud Run service locked down with --no-allow-unauthenticated. Off by default - a plain local or Compose run has no GCP credentials to fetch a token with and doesn't need one.",
     )
+    parser.add_argument(
+        "--vertex",
+        action="store_true",
+        help="Phase 8/D34: with --policy llm, call Claude via Vertex AI instead of the direct Anthropic API - authenticates as this process's own GCP identity (ADC/impersonation), no API key at all. Off by default - local venv/Compose keep using ANTHROPIC_API_KEY unchanged. Requires --vertex-project.",
+    )
+    parser.add_argument("--vertex-project", default=None, help="GCP project for --vertex, e.g. corridor-agents")
+    parser.add_argument(
+        "--vertex-region",
+        default="global",
+        help="Vertex AI region for --vertex (default: global, Vertex's own recommended region for Claude - not necessarily the region Cloud Run itself runs in)",
+    )
     args = parser.parse_args()
 
-    me, other = build_robots(args.side, args.scenario, args.policy)
+    if args.vertex and not args.vertex_project:
+        parser.error("--vertex requires --vertex-project")
+    vertex = (args.vertex_project, args.vertex_region) if args.vertex else None
+
+    me, other = build_robots(args.side, args.scenario, args.policy, vertex=vertex)
 
     if args.world_url:
         print(f"{me.name} ({args.policy}) moving via {args.world_url}, ready to negotiate {args.scenario} at the boundary")

@@ -194,18 +194,37 @@ crashes). Verified live twice - `robot-a` local (impersonated) → `robot-b`
 on Cloud Run, and `robot-a` as a real Cloud Run Job (metadata-server
 credentials, zero involvement from the laptop) → `robot-b` on Cloud Run
 - both real negotiations, correct outcome, and an unauthenticated `curl`
-to `robot-b` confirmed rejected (`403`) before either worked. Still
-open: Claude on Vertex AI (still the direct Anthropic API today) and
-Secret Manager (still `.env`).
+to `robot-b` confirmed rejected (`403`) before either worked.
 
-**Next: finish Phase 8** - Vertex AI, Secret Manager - then **Phase 9 —
-three or more robots** (Pub/Sub, Firestore). See `PLAN.md` §5.
+**Vertex AI added (D34), flag-gated.** A new `--vertex`/`--vertex-project`/
+`--vertex-region` on `agent.py` swaps `LLMPolicy`'s client from
+`anthropic.Anthropic()` to `AnthropicVertex(project_id, region)` -
+authenticates as the calling process's own GCP identity (ADC/impersonation
+locally, the service account on Cloud Run), no API key at all. Off by
+default: local venv/Compose are unchanged. Model IDs need no translation for
+Sonnet 5 (current-generation Vertex models use the bare first-party ID, not
+a dated `@` suffix); `--vertex-region` defaults to `"global"`, Vertex's own
+recommended region. **Not yet live-verified against the real Vertex API or
+redeployed to Cloud Run** - construction is unit-tested, but an actual
+model call needs a real smoke test first.
+
+**Secret Manager: deliberately dropped, not forgotten.** Once Cloud Run
+agents use `--vertex`, there's no API key left on that path for Secret
+Manager to protect - it would be infra for a secret that no longer exists in
+the cloud deployment. Local/Compose keep `ANTHROPIC_API_KEY` via `.env`,
+unchanged.
+
+**Next:** a live Vertex smoke test (confirm the model call actually works
+against project `corridor-agents`), then redeploy `robot-a`/`robot-b` with
+`--vertex --vertex-project corridor-agents` to close out Phase 8. After
+that, **Phase 9 — three or more robots** (Pub/Sub, Firestore). See
+`PLAN.md` §5.
 
 ## How to run things
 
 ```bash
 source .venv/bin/activate        # Python 3.13; required in each new shell
-python -m pytest tests/ -q       # 99 tests, no API calls, ~0.03s
+python -m pytest tests/ -q       # 105 tests, no API calls, ~0.03s
 python run.py                    # one negotiation, deterministic policies
 python run.py --a llm --b llm    # needs: cp .env.example .env && source .env
 python eval.py                   # measurement sweep, deterministic cases only
@@ -264,6 +283,13 @@ docker compose up --build
 python visualize_network.py --world-url http://127.0.0.1:9500/mcp
 python export_timeline_csv.py --world-url http://127.0.0.1:9500/mcp
 docker compose down               # when actually done
+
+# Phase 8/D34: same as the plain Phase 5 two-terminal run above, but the
+# --policy llm side calls Claude via Vertex AI instead of the direct API -
+# no .env/API key needed, just real GCP credentials (gcloud auth
+# application-default login) and a project with Vertex AI enabled.
+# NOT YET LIVE-VERIFIED - this is the smoke test to run before trusting it.
+python agent.py --scenario <id> --side a --policy llm --vertex --vertex-project corridor-agents --peer-url http://127.0.0.1:9001
 
 # Phase 8 (D33): real Cloud Run - robot-b as a Service (always listening),
 # robot-a as a Job (one-shot: dial, negotiate, exit). Needs gcloud CLI,
