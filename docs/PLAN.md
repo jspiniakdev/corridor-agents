@@ -379,13 +379,37 @@ Split into sub-phases because 10b turned out to be three separate pieces:
   `trigger_episode.py` starts an episode. Verified 3-terminal: two `--serve`
   robots, 3 episodes, no restart.
 
-- **10b-3b-ii — deploy.** All gcloud: `world@` SA + `roles/datastore.user` /
-  `roles/cloudtrace.agent`; `roles/run.invoker` for the robot SAs on the
-  world Service; `world_server.py` as a Cloud Run Service (`--firestore
-  --trace`); **`robot-a` converts Job→Service** (D33's "would change our
-  mind"); redeploy both robots with `--world-url --serve`. Ends with three
-  long-lived Cloud Run Services — world, robot-a, robot-b — plus Firestore,
-  and the D39 visualizer replaying a fully deployed episode.
+- **10b-3b-ii — deploy. DONE (D41), one loose end.** Three Cloud Run
+  Services: `world` (`world-server@` SA, `roles/datastore.user` +
+  `roles/cloudtrace.agent`, `--firestore --trace`, scale-to-zero), `robot-a`
+  and `robot-b` (`--world-url --serve --auth --trace`,
+  `--min-instances=1 --no-cpu-throttling`); `robot-a` converted Job→Service;
+  `roles/run.invoker` for the robot SAs on `world` and mutually. Verified
+  live: `trigger_episode.py --auth` → clean episode (`routine_vs_medical`,
+  Robot B wins, `a=8 b=1`), the `--serve` lifecycle in robot-a's logs, and
+  **one ~307-span Cloud Trace across all three Services**.
+
+  **A pre-visualizer review then found three deployed-path defects** (the
+  broken render turned out to be downstream of bad data, not a template
+  bug):
+  1. **Token expiry crash-loop — FIXED (D42).** The `--auth` OIDC token was
+     fetched once at startup and never refreshed; the robots 401'd and
+     `exit(1)`'d on a ~1h cycle. `WorldChannel` now builds a fresh
+     authenticated client per call and retries. Verified live 3-terminal
+     (kill/restart the world under two `--serve` robots); redeploy pending.
+  2. **`propose_action` is not idempotent.** A re-sent MCP call applies a
+     second real move (the 0.28s double-step in the deployed episode).
+     Planned: a world-side "too fast" minimum-move-interval limiter, which
+     also makes a fast retry a no-op.
+  3. **`record_negotiation` / `reset_world` have no episode guard.** A late
+     write from a livelocked earlier episode clobbered `world/current`,
+     leaving a stale transcript on two incompatible clocks — which is what
+     the `--firestore` visualizer choked on. Planned: an `episode_id` the
+     world stamps on reset and every robot→world write carries; mismatched
+     writes rejected. Plus: the world becomes the sole timestamper for
+     anything the replay consumes.
+
+  Then the `visualize_network.py --firestore` render, against clean data.
 
 ### Phase 11+ — The actual project, indefinitely
 

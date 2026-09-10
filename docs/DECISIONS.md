@@ -1599,3 +1599,120 @@ Three inputs, three redirects:
 **Verified live, 3-terminal, in-memory world:** two `agent.py --serve` robots ran **three full episodes without restarting** - `trigger_episode.py` between each (`reset_world` → "world reset - new episode" → negotiate → move → reach target → idle). 126 tests.
 
 **Not yet:** the deploy itself (10b-3b-ii, all gcloud) - a `world@` SA + `roles/datastore.user`/`roles/cloudtrace.agent`, `roles/run.invoker` for the robot SAs on the world Service, deploy `world_server.py` as a Service, convert `robot-a` Job→Service, redeploy both with `--world-url --serve`, then verify the 3-service trace tree + the D39 visualizer replaying a fully-deployed episode.
+
+## D41 — Phase 10b-3b-ii: the world-integrated pipeline, deployed as three Services
+
+**Decided:** deploy the full path — `world_server.py` + both `agent.py --world-url --serve` robots — as three Cloud Run **Services**, Firestore-backed, traced to Cloud Trace. Two robots negotiating (A2A) and moving through an MCP world with no local process anywhere. This is what 10b was building toward.
+
+**The three Services** (region `us-central1`, deterministic URLs `https://<svc>-433484676345.us-central1.run.app`, all `--no-allow-unauthenticated`):
+
+| Service | Command (args) | SA | Scaling |
+|---|---|---|---|
+| `world` | `world_server.py --host 0.0.0.0 --port 8080 --firestore --firestore-project corridor-agents --trace` | `world-server@` | scale-to-zero — the robots' polling keeps it warm while an episode runs |
+| `robot-a` | `agent.py --side a --policy gemini --vertex-project corridor-agents --advertise-url <robot-a> --peer-url <robot-b> --world-url <world>/mcp --auth --serve --trace` | `robot-a@` | `--min-instances=1 --no-cpu-throttling` |
+| `robot-b` | same, `--side b`, peer = `robot-a` | `robot-b@` | `--min-instances=1 --no-cpu-throttling` |
+
+Both robots carry `OTEL_TRACES_EXPORTER=gcp`. **`robot-a` converted from the D33 Job to a Service** — a `--serve` robot's movement loop is a background loop, not request-driven, so Cloud Run suspends it between requests unless the CPU is held (`--no-cpu-throttling`) and an instance stays warm (`--min-instances=1`). `world` needs neither: every MCP tool call is a request, and the robots poll several times a second, so it stays warm on traffic and scales to zero when idle.
+
+**IAM added:**
+- `world-server@`: `roles/datastore.user` (the `world/current` doc), `roles/cloudtrace.agent` (span export).
+- `roles/run.invoker`, per-service: `robot-a@` and `robot-b@` on `world`; `robot-b@` on `robot-a`, `robot-a@` on `robot-b` (the A2A calls — D33's pattern, now mutual).
+
+**Verified live — one full episode, all three Services, nothing local:**
+- `trigger_episode.py --world-url <world>/mcp --auth` → `{'reset': True}`.
+- The idle `--serve` robots picked it up: 4-message negotiation, `routine_vs_medical` — Robot B claimed the medical cargo ("blood products for surgery"), Robot A yielded (correct). Both reached target (`a=8 b=1`), 37-entry episode log in `world/current`.
+- `robot-a` logs show the `--serve` lifecycle across episodes: `reached target` → `idle - waiting for reset_world` → `world reset - new episode`.
+- **Cloud Trace: one trace (~307 spans), all three Services.** `world.episode` → `world.tick` fans into (a) the MCP world calls, cross-process — `mcp.get_observation` → mcp-sdk `tools/call` → `world.get_observation` on the world Service — and (b) the full A2A negotiation subtree — `negotiation.episode` → `negotiation.turn` → `llm.respond` (Gemini) + `a2a.client…send_message_streaming` → (into the peer) `POST /` → `negotiation.handle` → `llm.respond`. The `record_negotiation` write is its own in-trace chain (`mcp.record_negotiation` → `world.record_negotiation`).
+
+**Not yet verified — `visualize_network.py --firestore` against the deployed episode.** The Firestore *read* is correct: the generated HTML embeds the grid, the 4-message transcript, and a 17-step movement log (ending `a=8 b=1`) pulled from `world/current` alone. But the rendered page is wrong — the bug is downstream of `main_firestore`, in `_write_html` / `visualize_template.html` getting a data shape it doesn't expect, or a browser-side JS error. Under investigation; **10b-3b-ii is not fully closed until this renders.**
+
+**Gotchas:**
+- **`gcloud iam service-accounts create world` is rejected** — account IDs must be 6–30 chars. Used `world-server`.
+- **The OIDC token audience for the world is the Service base URL, not `<base>/mcp`** (fixed in D40's `build_world_client`, commit `dd44f0f`). `trigger_episode.py --auth` 403'd until the audience became `f"{scheme}://{netloc}"`. Cloud Run validates `aud` against the Service, not the request path; D33's `--peer-url` had no path so this never surfaced before.
+- **Episode 1 livelocked for ~100 s** (100+ `wait/wait` at `a=2 b=6`) — `robot-b@`'s just-granted `roles/run.invoker` on `robot-a` took ~20 s to propagate, so robot-b's agent-card fetches 403'd and the negotiation couldn't open. It **self-recovered** the moment IAM caught up (the next episode resolved first try). Not a code bug — but a reminder that **the networked path still has no deadlock/livelock recovery**: `world.py`'s `tie_break()` has no `run_robot` equivalent, so an unlucky `both_urgent` would not have escaped on its own.
+
+**Cost:** the two `--min-instances=1 --no-cpu-throttling` robot Services run ~$15–40/month combined even idle. To pause between demos, delete them — `--min-instances=0` isn't enough on its own, because a scaled-to-zero `--serve` robot has no way to be woken (the world can't call it; `trigger_episode` only resets the world doc). `world` costs nothing idle.
+
+**This all-but-closes Phase 10** — the deploy and the 3-service trace are done; only the `--firestore` visualizer render remains. Phase 8 (Claude-on-Vertex) stays blocked on the quota ticket; the pipeline runs on Gemini meanwhile — swap `--policy`, not infrastructure (D36).
+
+**Would change our mind:** if idle cost ever matters more than instant-on, drop `--min-instances` to 0 and give each robot a lightweight HTTP wake endpoint that `trigger_episode.py` hits (instead of the robots polling). More moving parts; only worth it if the Services sit idle for days at a stretch.
+
+---
+
+## D42 — WorldChannel: a fresh world MCP client per call, retried, instead of crashing
+
+**The bug.** The deployed robots (D41) were crash-looping on a clean ~1-hour
+cycle. `build_world_client` fetched the `--auth` OIDC token **once**, at process
+start, and baked it into a static `Authorization: Bearer` header on a
+process-lifetime `httpx2.AsyncClient`. Real tokens last ~1h; a `--serve` robot
+runs for days. After an hour every world call got a Cloud Run **platform-level
+401** ("The access token could not be verified" — visible only in the *world's*
+logs, not the robot's). The unhandled error propagated out of `run_robot` →
+`asyncio.run` → `exit(1)` → restart with a fresh token → fine for an hour →
+repeat. World logs showed 401 pairs exactly 1h apart.
+
+Found during the pre-visualizer review that also turned up the non-idempotent
+`propose_action` / stale-transcript issues (separate fixes, still to come).
+
+**How the crash actually surfaced** (learned mid-fix, by killing a local world
+under two `--serve` robots): *not* as an `MCPError`. The mcp `Client` holds its
+streamable-http transport's `anyio` task group open across calls; when the
+connection dies that task group's cancel scope fires and **cancels the caller's
+in-flight `receive()`** — so what reached `run_robot` was a bare
+`asyncio.CancelledError`, which `except Exception` doesn't catch (it's a
+`BaseException`). A first attempt that kept one long-lived client and caught
+`MCPError` would not have caught this.
+
+**Decided.** A `WorldChannel` builds a **fresh authenticated client per call**
+(`build_world_client` → `get_id_token` every time), makes the one call inside its
+own `async with`, closes it, and retries on failure.
+
+- The token is re-minted on every call, so the ~1h expiry simply cannot bite —
+  no token-age tracking, no proactive-refresh timer.
+- A connection that died between calls is just a failed `connect` on the next one
+  — a normal `ExceptionGroup[ConnectError]`, caught and retried — never a
+  poisoned long-lived client.
+- For a connection that dies *mid-call*: the call runs as its own task
+  (`asyncio.ensure_future`), so the transport's cancel scope cancels *that* task,
+  and `await`ing it raises `CancelledError` here as a plain exception. We retry
+  it **unless our own task is genuinely being cancelled** —
+  `asyncio.current_task().cancelling() > 0` — in which case we re-raise so a real
+  shutdown still works.
+- **`serve=True`**: unbounded retries, capped exponential backoff
+  (`WORLD_RETRY_BASE_SECONDS` 1s → `WORLD_RETRY_CAP_SECONDS` 30s). An idle robot
+  has nothing better to do than wait out an outage.
+- **`serve=False`** (local one-shot, incl. `trigger_episode.py`): raises the last
+  error after `MAX_LOCAL_WORLD_ATTEMPTS` (3) — a dead world should surface, not
+  hang.
+- Duck-types `Client.call_tool(name, args)`, so `mcp_call` and its four call
+  sites are unchanged; `run_robot` swaps `async with build_world_client(...)` →
+  `async with WorldChannel(...)`. `build_world_client` now returns
+  `(client, aclose)`; `trigger_episode.py` switched to `WorldChannel` too.
+
+**Verified live, local 3-terminal:** two `--serve` robots, 3 episodes; `kill -9`
+the world mid-idle → both robots log `world call 'get_observation' failed
+(...ConnectError...) - retrying, attempt N` and **stay up**; restart the world +
+`trigger_episode.py` → both rejoin and run the next episode clean. Same PIDs
+throughout. 132 unit tests.
+
+**The A2A channel (`build_client_config`) has the same once-per-fetch shape** but
+`get_id_token(peer_url)` runs inside `create_client()`, which `run_initiator` /
+`run_initiator_webhook` call fresh per negotiation — so the A2A token is
+effectively fresh unless a *single* negotiation runs >1h (it won't). Left as-is,
+flagged here.
+
+**Companion fix:** `ENV PYTHONUNBUFFERED=1` in the Dockerfile. Cloud Run captured
+almost none of the robots' `print`s during this investigation — Python
+block-buffers stdout when it isn't a TTY, so a crashing container's last and most
+useful lines never reached Cloud Logging.
+
+**Cost of per-call connect:** an MCP `initialize` handshake (~1 extra round-trip)
+per world call. At ~1 poll/s, and world calls off the latency-critical path,
+this is fine; if it ever isn't, the alternative is a refreshing `google-auth`
+credential / httpx auth hook on one long-lived client — but that reintroduces the
+long-lived-client cancellation problem above.
+
+**Would change our mind:** if the unbounded `serve=True` retry ever masks a real,
+persistent outage in a way that matters — add a max wall-clock budget after which
+even a `--serve` robot exits (and lets Cloud Run restart it clean). Not worth it
+now: the backoff caps at 30s and every attempt logs.

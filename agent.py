@@ -40,6 +40,16 @@ from agent_executor import NegotiationExecutor  # noqa: E402
 
 POLL_INTERVAL_SECONDS = 1.0  # D30: how often a robot checks in with the world - governs movement, waiting, and negotiation-trigger cadence uniformly, not a separate "how long does moving take" model. Slept BEFORE each check-in (top of run_robot()'s loop), not after - so the first check-in is paced too, not a free instant action exempt from the interval.
 
+# WorldChannel resilience (D42 fix). The --auth OIDC token lasts ~1h; a --serve
+# robot runs for days, so the world channel builds a fresh client per call and
+# retries on failure rather than let a 401 - or the dead client's transport task
+# group - crash the process. The token itself is cached (re-minted well before
+# expiry, or on any failure) so we don't do a blocking token fetch every call.
+WORLD_RETRY_BASE_SECONDS = 1.0
+WORLD_RETRY_CAP_SECONDS = 30.0
+WORLD_TOKEN_MAX_AGE_SECONDS = 2400  # re-mint the OIDC token after 40min - real lifetime is ~1h
+MAX_LOCAL_WORLD_ATTEMPTS = 3  # without --serve, a dead world should surface after a few tries, not hang forever
+
 
 def _make_policy(args):
     """Parsed CLI args -> a policy for this robot. The deterministic
@@ -156,31 +166,137 @@ def build_client_config(peer_url, auth):
     return ClientConfig(httpx_client=httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}))
 
 
-def build_world_client(world_url, auth):
-    """The MCP client for the world channel. Plain Client(url) unless
-    --auth (Phase 10b-3b): a deployed world_server.py Service is locked
-    down with --no-allow-unauthenticated exactly like robot-b, so the
-    robots' MCP calls need the same OIDC bearer token their A2A calls
-    already carry. mcp's high-level Client takes a URL string but gives no
-    header hook - so wrap the streamable-http transport in an
-    httpx2.AsyncClient carrying the token (audience = the world's URL)."""
+def world_token_audience(world_url):
+    """Cloud Run validates a token's `aud` against the Service's base URL,
+    not the request path - so the audience is scheme://host, even though
+    the MCP endpoint itself is <base>/mcp. (D33's A2A --peer-url had no
+    path, so this never came up before.)"""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(world_url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def build_world_client(world_url, auth, token=None):
+    """The MCP client for the world channel, as (client, aclose). Plain
+    Client(url) unless --auth (Phase 10b-3b): a deployed world_server.py
+    Service is locked down with --no-allow-unauthenticated exactly like
+    robot-b, so the robots' MCP calls need the same OIDC bearer token
+    their A2A calls already carry. mcp's high-level Client takes a URL
+    string but gives no header hook - so wrap the streamable-http
+    transport in an httpx2.AsyncClient carrying the token.
+
+    `token` lets a caller (WorldChannel) pass one it already has cached;
+    left None, one is minted here. `aclose` is an async callable that
+    closes any transport we own (a no-op without --auth) - the caller
+    runs it after every call so a long-lived robot doesn't leak an httpx
+    connection pool per call (D42)."""
     from mcp.client import Client
 
+    async def _noop():
+        pass
+
     if not auth:
-        return Client(world_url)
+        return Client(world_url), _noop
 
     import httpx2
-    from urllib.parse import urlsplit
     from mcp.client.streamable_http import streamable_http_client
 
-    # Cloud Run validates a token's `aud` against the Service's base URL,
-    # not the request path - so the audience is scheme://host, even though
-    # the MCP endpoint itself is <base>/mcp. (D33's A2A --peer-url had no
-    # path, so this never came up before.)
-    parts = urlsplit(world_url)
-    token = get_id_token(f"{parts.scheme}://{parts.netloc}")
+    if token is None:
+        token = get_id_token(world_token_audience(world_url))
     authed = httpx2.AsyncClient(headers={"Authorization": f"Bearer {token}"})
-    return Client(streamable_http_client(world_url, http_client=authed))
+    return Client(streamable_http_client(world_url, http_client=authed)), authed.aclose
+
+
+class WorldChannel:
+    """Makes every world MCP call ride out a token expiry, a world
+    cold-start, or a dropped connection instead of letting the exception
+    kill the process. Deployed robots (D41) were crash-looping once an
+    hour on the ~1h --auth OIDC token expiring -> Cloud Run 401 until D42.
+
+    A fresh client per call (with a cached token, re-minted well before
+    the ~1h expiry or on any failure): a dead connection is just a failed
+    connect on the next call - not a poisoned long-lived client whose
+    internal transport task group drags our own task down with it when it
+    dies (which is how the crash actually surfaced: a bare CancelledError,
+    not an MCPError). serve=True retries forever with capped exponential
+    backoff; serve=False raises after MAX_LOCAL_WORLD_ATTEMPTS so a local
+    one-shot run surfaces a dead world instead of hanging.
+
+    Duck-types Client.call_tool(name, args), so mcp_call and its call
+    sites don't change. `connect` / `sleep` / `now` / `fetch_token` are
+    injectable for tests."""
+
+    def __init__(self, world_url, auth, *, serve, connect=build_world_client, sleep=None, now=None, fetch_token=None):
+        self._world_url = world_url
+        self._auth = auth
+        self._serve = serve
+        self._connect = connect
+        self._sleep = sleep or asyncio.sleep
+        self._now = now or time.monotonic
+        self._fetch_token = fetch_token or get_id_token
+        self._token = None
+        self._token_at = None
+
+    def _backoff(self, attempt):
+        return min(WORLD_RETRY_BASE_SECONDS * (2 ** attempt), WORLD_RETRY_CAP_SECONDS)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def _current_token(self):
+        """The cached OIDC token, re-minted when stale (or after a failure
+        cleared it). Fetched off the event loop - get_id_token does
+        blocking HTTPS (metadata server, or the IAM API for impersonated
+        creds)."""
+        if not self._auth:
+            return None
+        if self._token is None or self._now() - self._token_at > WORLD_TOKEN_MAX_AGE_SECONDS:
+            self._token = await asyncio.to_thread(self._fetch_token, world_token_audience(self._world_url))
+            self._token_at = self._now()
+        return self._token
+
+    async def _call_once(self, name, args):
+        client, aclose = self._connect(self._world_url, self._auth, await self._current_token())
+        try:
+            async with client as session:
+                return await session.call_tool(name, args)
+        finally:
+            await aclose()
+
+    async def call_tool(self, name, args):
+        attempt = 0
+        last_exc = None
+        while True:
+            # Run the call as its own task: if the mcp client's transport
+            # task group dies mid-call it cancels *that* task, and awaiting
+            # a cancelled task raises CancelledError here as a plain
+            # exception without cancelling us - so we can tell it apart
+            # from a real shutdown (which increments our own cancelling()).
+            call = asyncio.ensure_future(self._call_once(name, args))
+            try:
+                return await call
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling() > 0:
+                    call.cancel()
+                    try:
+                        await call
+                    except BaseException:
+                        pass
+                    raise
+                last_exc = ConnectionError("world connection dropped mid-call")
+            except Exception as err:  # any world / transport / auth failure is retryable here
+                last_exc = err
+            self._token = None  # a failure might be a bad/expired token - re-mint on the next attempt
+            attempt += 1
+            if not self._serve and attempt >= MAX_LOCAL_WORLD_ATTEMPTS:
+                raise last_exc
+            print(f"world call {name!r} failed ({last_exc!r}) - retrying, attempt {attempt}", flush=True)
+            await self._sleep(self._backoff(attempt))
 
 
 async def run_initiator(me, other, peer_url, max_turns, auth=False):
@@ -762,7 +878,7 @@ async def run_robot(
         log_status("new episode")
 
     try:
-        async with build_world_client(world_url, auth) as world:
+        async with WorldChannel(world_url, auth, serve=serve) as world:
             while True:
                 await one_episode(world)
                 if not serve:

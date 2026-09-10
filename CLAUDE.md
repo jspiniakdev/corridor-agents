@@ -296,23 +296,64 @@ reachable. New `trigger_episode.py` = the "start an episode" button
 (`reset_world` over MCP). Verified live 3-terminal: two `--serve` robots ran
 **3 episodes without restarting**, `trigger_episode.py` between each.
 
-**10b-3b-ii remains (all gcloud):** `world@` SA + `roles/datastore.user` /
-`roles/cloudtrace.agent`; `roles/run.invoker` for the robot SAs on the world
-Service; deploy `world_server.py` as a Service (`--firestore --trace`);
-convert `robot-a` Job→Service; redeploy both with `--world-url --serve`;
-verify the 3-service trace tree + the D39 visualizer replaying a fully
-deployed episode. See `PLAN.md` §5.
+**Phase 10b-3b-ii done (D41): the world-integrated path deployed as three
+Cloud Run Services.** `world` (`world-server@` SA, `roles/datastore.user` +
+`roles/cloudtrace.agent`, `--firestore --trace`, scale-to-zero), `robot-a`
+and `robot-b` (both `--world-url --serve --auth --trace`,
+`--min-instances=1 --no-cpu-throttling`); `robot-a` converted Job→Service;
+`roles/run.invoker` for the robot SAs on `world` and on each other.
+Verified live: `trigger_episode.py --auth` → a clean episode (4-msg
+negotiation, `routine_vs_medical`, Robot B wins, `a=8 b=1`), robot-a logs
+show `reached target → idle → new episode`, and Cloud Trace has **one
+~307-span trace across all three Services** (`world.episode`/`tick` →
+cross-process `mcp.* → world.*` + the full A2A `negotiation.*`/`llm.respond`
+subtree into the peer). **Still open:** `visualize_network.py --firestore`
+against the deployed episode - the Firestore read is correct (grid +
+transcript + 17-step log all embedded) but the rendered HTML is wrong; bug
+is in `_write_html` / the template, under investigation. See `PLAN.md` §5,
+`DECISIONS.md` D41.
+
+**D42: WorldChannel - a fresh world MCP client per call, retried, instead
+of crashing.** The deployed robots were crash-looping on a ~1h cycle:
+`build_world_client` fetched the `--auth` OIDC token once at startup, it
+expired after ~1h, every world call then got a Cloud Run 401, and the
+unhandled error (a bare `CancelledError` from the dead client's transport
+task group, not an `MCPError`) killed the process. `WorldChannel` now
+builds a fresh authenticated client per call (`get_id_token` every time, so
+the ~1h expiry can't bite; a dead connection is just a failed connect next
+call, not a poisoned long-lived client), retries with capped backoff
+(unbounded with `--serve`; raises after 3 tries without it -
+`trigger_episode.py` too). `mcp_call` / call sites unchanged;
+`build_world_client` returns `(client, aclose)`. Companion:
+`PYTHONUNBUFFERED=1` in the Dockerfile (Cloud Run was dropping the robots'
+`print`s). **Verified live local 3-terminal** (kill -9 the world mid-idle →
+robots log retries and stay up → restart + `trigger_episode.py` → rejoin
+clean); 132 unit tests. **Not yet redeployed.** See `DECISIONS.md` D42.
+
+**Also flagged in the same review, not yet fixed:** `propose_action` is not
+idempotent (a re-sent MCP call = a real extra move - the 0.28s double-step
+seen in the deployed episode) and `record_negotiation` has no episode guard
+(a late write from a prior episode clobbered `world/current` - the
+transcript the visualizer choked on). Planned fixes: a world-side "too
+fast" move limiter, an `episode_id` stale-write guard, and making the world
+the sole timestamper. See the design memory / `PLAN.md` §5.
+
+**Cost note:** the two robot Services bill ~$15-40/mo combined even idle
+(`--min-instances=1`). Delete them between demos - `--min-instances=0` isn't
+enough because a scaled-to-zero `--serve` robot can't be woken.
 
 **Phase 9 (three or more robots) is deliberately skipped for now** - it's
 a `world.py` rewrite plus a real N-way-negotiation design fork, and the
 discovery/broadcast half (Firestore registry, Pub/Sub) only earns its keep
 at 3+ robots. Staying at 2 robots.
 
-**Next:** a live Vertex smoke test (confirm the model call works against
-project `corridor-agents` - **blocked on a GCP quota increase**, auto-denied
-on the fresh project, support ticket open), then redeploy `robot-a`/
-`robot-b` with `--vertex` + `--trace` (`OTEL_TRACES_EXPORTER=gcp`) to close
-out Phase 8 and 10b together. See `PLAN.md` §5.
+**Next:** (1) redeploy + verify D42 (WorldChannel) live - the ~1h crash loop
+should be gone; (2) the `propose_action` idempotency / `episode_id` guard /
+sole-timestamper fixes from the review; (3) *then* fix the
+`visualize_network.py --firestore` render to close 10b-3b-ii, on clean data;
+(4) Phase 8 - Claude-on-Vertex still **blocked on a GCP quota increase**
+(auto-denied, support ticket open); once it clears, `--policy claude` on
+Vertex is a policy swap, not an infra change (D36). See `PLAN.md` §5.
 
 ## How to run things
 

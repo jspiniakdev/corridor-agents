@@ -86,3 +86,21 @@ python run.py --a llm --b llm
   set-quota-project` fails here ("not user credentials") because the ADC
   is an impersonated service account, not a plain login - that's expected,
   not a problem.
+- **Deploying the world-integrated pipeline** (D41, Phase 10b-3b-ii):
+  - `gcloud iam service-accounts create world` is rejected - account IDs
+    must be 6-30 chars. The world Service's SA is `world-server@`.
+  - A newly-granted `roles/run.invoker` takes ~20s to propagate. The first
+    deployed episode livelocked ~100s while robot-b's agent-card fetches to
+    robot-a 403'd, then self-recovered once IAM caught up. Grant the
+    bindings, wait a beat before triggering the first episode.
+  - `robot-a` and `robot-b` run with `--min-instances=1
+    --no-cpu-throttling` (the `--serve` movement loop is a background loop,
+    not request-driven - Cloud Run suspends it otherwise). This bills
+    ~$15-40/month combined **even idle**. `gcloud run services delete
+    robot-a robot-b` between demos; `--min-instances=0` alone doesn't help
+    because a scaled-to-zero `--serve` robot can't be woken. The `world`
+    Service scales to zero on its own and costs nothing idle.
+  - The OIDC token audience for a locked-down world Service is its **base
+    URL** (`https://world-….run.app`), not the `/mcp` endpoint path -
+    Cloud Run validates `aud` against the Service. Handled in
+    `agent.py`'s `build_world_client`; see `DECISIONS.md` D40/D41.

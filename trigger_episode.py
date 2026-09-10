@@ -19,11 +19,13 @@ import sys
 
 sys.path.insert(0, "src")
 
-from agent import build_world_client, mcp_call  # noqa: E402
+from agent import WorldChannel, mcp_call  # noqa: E402
 
 
 async def main_async(world_url, auth):
-    async with build_world_client(world_url, auth) as world:
+    # serve=False: a one-shot trigger should surface a dead/unreachable world
+    # after a few tries, not retry forever (D42).
+    async with WorldChannel(world_url, auth, serve=False) as world:
         print(await mcp_call(world, "reset_world"))
 
 
