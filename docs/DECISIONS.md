@@ -1848,3 +1848,33 @@ check is a read-then-write, not transactional - a TOCTOU window exists but
 `record_negotiation` fires once per episode from one robot and `reset` happens
 between episodes, so a real race needs a >1-episode-long clock skew. If that ever
 bites, fold it into a transaction like `propose`.
+
+---
+
+## D45 — the observation gives the other robot's distance to the corridor entrance
+
+Reviewing a clean deployed episode's negotiation: Robot A said *"I am 1 cell
+from the corridor, you are 4 cells."* Robot B was at its boundary, also 1 cell
+from the corridor. A had read `gap_if_sensed` (the 4-cell robot-to-robot gap)
+and restated it as B's distance to the corridor - and ignored the
+`other_distance_to_boundary: 0` line that said B was right there.
+
+Partly an LLM error, but the observation invited it: it gave A its *own*
+distance to the entrance and B's distance to B's *boundary*, but never B's
+distance to the *entrance* - so A couldn't directly check "who's closer" from
+the text. Same shape as D24's gap, one field short.
+
+`get_observation` now also returns `other_distance_to_entrance` (world computes
+it - it knows both positions and the grid, same rationale as D23's
+`other_distance_to_boundary`), and `compose_observation_from_dict` puts it right
+after the robot's own line so they read as a pair:
+
+> You are 1 cell(s) from the corridor entrance. Another robot (Robot B) is
+> approaching from the opposite end, 4 cell(s) away. **Robot B is 1 cell(s) from
+> the corridor entrance on its side.** Robot B is 0 cell(s) from its own boundary
+> before the corridor.
+
+Phase 3's `compose_observation()` got the same line (deriving the other robot's
+direction as `-my_direction`), so `simulate.py`/`run.py` LLM runs stay in sync.
+Deterministic policies don't read the text; no scoring impact. 150 tests.
+Deploys with D43/D44 (all three Services).

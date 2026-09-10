@@ -47,6 +47,10 @@ def compose_observation(
     gap = abs(my_position - other_position)
     if gap <= sensor_range:
         lines.append(f"Another robot is approaching from the opposite end, {gap} cell(s) away.")
+        # its own distance to the corridor - the other robot heads for the
+        # opposite entrance, so its direction is just -my_direction here
+        other_distance = distance_to_entrance(other_position, -my_direction, corridor_zone)
+        lines.append(f"It is {other_distance} cell(s) from the corridor entrance on its side.")
 
     lines.append(private_text)
     return " ".join(lines)
@@ -56,20 +60,32 @@ def compose_observation_from_dict(obs: dict, other_name: str, private_text: str)
     """Same job as compose_observation() (D4b, Job 4), for the networked
     flow - built from world_server.py's get_observation() dict (D17)
     instead of raw positions, since a networked robot never holds
-    positions locally at all. Extended with one fact Phase 3 never needed:
-    how far the other robot is from ITS OWN boundary, not just how far
-    away it currently is - without this, a robot has no way to tell a
-    real conflict apart from something merely sensed from a long way off.
-    D21's asymmetric grid made that gap real; caught directly from a user
-    reviewing a live negotiation where the LLM had no way to know the
-    other robot was nowhere near the corridor at all (D24) - this
-    function didn't exist before that: compose_observation() was never
-    actually called anywhere in the networked path (agent.py/
-    agent_executor.py), so a networked LLM negotiated on private text
-    alone, with zero position or sensing awareness, since Phase 5."""
+    positions locally at all. Carries two facts about the other robot
+    that Phase 3's version didn't:
+
+    - how far it is from the corridor *entrance* on its side - the direct
+      counterpart to "You are N cell(s) from the corridor entrance", so a
+      robot can actually judge who's closer instead of guessing (caught
+      from a live negotiation where the LLM claimed the other robot was
+      4 cells from the corridor - it was reading the robot-to-robot gap -
+      when both were 1 cell away).
+    - how far it is from its *own boundary* - D23/D24: without this a
+      robot can't tell a real standoff from something merely sensed from
+      far off. D21's asymmetric grid made that gap real; caught from a
+      user reviewing a live negotiation where the LLM had no way to know
+      the other robot was nowhere near the corridor at all.
+
+    compose_observation() was never actually called anywhere in the
+    networked path (agent.py / agent_executor.py) before D24, so a
+    networked LLM negotiated on private text alone, with zero position or
+    sensing awareness, since Phase 5."""
     lines = [f"You are {obs['distance_to_entrance']} cell(s) from the corridor entrance."]
     if obs["sensed_other"]:
         lines.append(f"Another robot ({other_name}) is approaching from the opposite end, {obs['gap_if_sensed']} cell(s) away.")
+        if obs.get("other_distance_to_entrance") is not None:
+            lines.append(
+                f"{other_name} is {obs['other_distance_to_entrance']} cell(s) from the corridor entrance on its side."
+            )
         if obs.get("other_distance_to_boundary") is not None:
             lines.append(
                 f"{other_name} is {obs['other_distance_to_boundary']} cell(s) from its own boundary before the corridor."

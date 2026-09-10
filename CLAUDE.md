@@ -135,6 +135,14 @@ equivalent, also carrying D23's `other_distance_to_boundary`), wired into
 MCP observation every loop iteration, using the original private text
 captured once so it never compounds.
 
+**D45 extends it:** a reviewed episode had an LLM claim the other robot was
+"4 cells from the corridor" (it had read the robot-to-robot gap) when both
+were 1 cell away. The observation gave a robot its *own* distance to the
+entrance and the other's distance to its *boundary*, but not the other's
+distance to the *entrance* - so "who's closer" wasn't checkable from the
+text. `get_observation` now returns `other_distance_to_entrance` and both
+`compose_observation` variants render it right after the robot's own line.
+
 **Raw ground-truth debugging (D29):** every message now carries a real
 per-message `time.time()` in `experiments/results/negotiation_trace.json`
 (always on, cheap). `agent.py --debug-log` (off by default) writes

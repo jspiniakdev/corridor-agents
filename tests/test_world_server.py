@@ -61,6 +61,23 @@ def test_get_observation_reports_other_distance_to_its_own_boundary():
     assert obs["other_distance_to_boundary"] == 1
 
 
+def test_get_observation_reports_other_distance_to_the_corridor_entrance():
+    reset_state()
+    _state().a.position = 2
+    _state().b.position = 6  # the reviewed standoff - both one cell from the corridor
+    a_obs = ws.get_observation("a")
+    assert a_obs["distance_to_entrance"] == 1
+    assert a_obs["other_distance_to_entrance"] == 1  # B at 6 -> entrance 5
+    b_obs = ws.get_observation("b")
+    assert b_obs["distance_to_entrance"] == 1
+    assert b_obs["other_distance_to_entrance"] == 1  # A at 2 -> entrance 3
+
+
+def test_get_observation_other_distance_to_entrance_none_when_not_sensed():
+    reset_state()  # A=1, B=8, gap 7 > sensor 6
+    assert ws.get_observation("a")["other_distance_to_entrance"] is None
+
+
 def test_propose_action_rejects_invalid_action():
     reset_state()
     try:

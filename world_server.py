@@ -86,6 +86,7 @@ def get_observation(side: str) -> dict:
             "sensed_other": sensed,
             "gap_if_sensed": gap if sensed else None,
             "other_distance_to_boundary": abs(other.position - other.boundary) if sensed else None,
+            "other_distance_to_entrance": distance_to_entrance(other.position, other.direction, CORRIDOR_ZONE) if sensed else None,
             "at_boundary": me.at_boundary,
             "in_zone": me.in_zone,
             "reached_target": me.reached_target,

@@ -40,6 +40,14 @@ def test_sensor_fact_present_within_range():
     assert "Another robot" in text
 
 
+def test_sensor_fact_includes_the_other_robots_distance_to_its_entrance():
+    # the exact standoff from the reviewed episode: A at 2, B at 6 - both
+    # one cell from the corridor. The LLM had claimed B was 4 cells away.
+    text = compose_observation(2, 1, 6, CORRIDOR_ZONE, SENSOR_RANGE, "private")
+    assert "You are 1 cell(s) from the corridor entrance." in text
+    assert "It is 1 cell(s) from the corridor entrance on its side." in text
+
+
 def test_sensor_fact_absent_just_outside_range():
     text = compose_observation(2, 1, 2 + SENSOR_RANGE + 1, CORRIDOR_ZONE, SENSOR_RANGE, "private")
     assert "Another robot" not in text
@@ -106,20 +114,29 @@ def test_from_dict_includes_sensor_fact_when_sensed():
         "distance_to_entrance": 1,
         "sensed_other": True,
         "gap_if_sensed": 6,
+        "other_distance_to_entrance": 3,
         "other_distance_to_boundary": 4,
     }
     text = compose_observation_from_dict(obs, "Robot B", "private")
     assert "Robot B" in text
     assert "6 cell(s) away" in text
+    assert "3 cell(s) from the corridor entrance on its side" in text
     assert "4 cell(s) from its own boundary" in text
     assert text.endswith("private")
 
 
 def test_from_dict_omits_sensor_facts_when_not_sensed():
-    obs = {"distance_to_entrance": 1, "sensed_other": False, "gap_if_sensed": None, "other_distance_to_boundary": None}
+    obs = {
+        "distance_to_entrance": 1,
+        "sensed_other": False,
+        "gap_if_sensed": None,
+        "other_distance_to_entrance": None,
+        "other_distance_to_boundary": None,
+    }
     text = compose_observation_from_dict(obs, "Robot B", "private")
     assert "Robot B" not in text
     assert "own boundary" not in text
+    assert "on its side" not in text
 
 
 def test_from_dict_omits_other_boundary_fact_when_sensed_but_unknown():
