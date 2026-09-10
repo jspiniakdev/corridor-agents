@@ -69,9 +69,15 @@ Cloud Run services and a Firestore-backed loop world.
 ### The life / urgency / death mechanic
 - Every robot starts with **life = 100**.
 - `urgency` is a **drain rate in life-points per tick, applied only while the
-  robot is yielding / blocked** (stopped at a corridor mouth waiting its turn).
-  A robot that is moving — including free-flow and its turn through a corridor —
-  loses nothing.
+  robot is physically blocked by a *resolved* corridor contest** — held at a
+  boundary (or queued behind such a robot) because the corridor is occupied by,
+  or committed to, someone else. A robot that is moving — free-flow or its own
+  turn through a corridor — loses nothing.
+- **The negotiation itself is free.** No drain accrues while a negotiation is in
+  progress: its duration is dominated by LLM latency, an artifact, not a real
+  cost. The clock starts only once the negotiation has concluded and this robot
+  is the one made to wait. (A *deadlocked* negotiation counts as concluded —
+  both sides then drain, so a standoff is still lethal.)
 - Drain rate is scenario-set per robot: higher for urgent robots, lower for
   patient ones. Concrete numbers and the length/drain/life coupling are in the
   **World spec** section below.
@@ -178,11 +184,14 @@ adjacent side.
    both directions, phased oppositely around the loop.
 
 ### Life / urgency (coupled numbers)
-`life = 100`, fixed. A robot drains `urgency` points **per wait-tick while
-blocked by a corridor** (queued, or holding for the winner to clear). "Lost
-negotiations until death" is a function of `urgency × corridor length`:
+`life = 100`, fixed. A robot drains `urgency` points **per tick that it is held
+`wait`ing by a resolved corridor contest** — after the negotiation concludes,
+while the corridor is occupied by / committed to the other robot (or while queued
+behind such a robot). Negotiation-in-progress ticks are free (see the mechanic
+above). "Lost negotiations until death" is a function of `urgency × blocked-time`,
+and blocked-time ≈ the corridor's length (how long the winner takes to clear it):
 
-| `urgency` | role | survives a lost North (~6-tick wait) | a lost South (~4-tick) |
+| `urgency` | role | survives a lost North (~6-tick block) | a lost South (~4-tick) |
 |---|---|---|---|
 | 3–5 | patient | ~3–4 losses | 5+ |
 | **10** (proposed baseline) | normal | 1, dies on the 2nd | 2, dies on the 3rd |
@@ -223,10 +232,17 @@ first.
 - **BR robot heading CW → South: 2-cell approach** (symmetric to the above).
   Either shift South to `[27,30]` to match, or just don't use that spawn slot in
   the default configs.
-- Does life drain during the **LLM negotiation wall-clock** (11c only)? The world
-  has no clock (D17) — ticks are polls, a negotiating robot isn't polling, so
-  under the current architecture it does not drain mid-negotiation. Fine for
-  11a–11b.
+- **When exactly does the loser's drain clock start?** Decided: *not* during the
+  negotiation (LLM latency is an artifact, not a cost). Two candidate start
+  points for the post-negotiation block: (a) the moment agreement is reached and
+  the loser is holding at its boundary, or (b) only once the winner physically
+  enters the corridor. Recommend **(a)** — "you agreed to wait; waiting is the
+  cost" — and keep negotiations firing near-arrival so (a) ≈ (b). Fall back to
+  (b) if early-fire negotiations (sensing the other before it arrives) inflate
+  the block time well past a corridor-length. The clockless world (D17) helps
+  here: a robot away negotiating isn't polling, so it accrues no ticks anyway;
+  the only case needing explicit suppression is a robot *queued behind* an
+  in-progress contest.
 - Same-direction **convoy** through a corridor — disallowed in 11a; the numbers
   above assume one robot per corridor at a time.
 - Optional extra asymmetry: unequal left/right sides (e.g. H_left 8, H_right 6 →
