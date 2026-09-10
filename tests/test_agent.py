@@ -101,6 +101,18 @@ def test_build_world_client_plain_without_auth():
     assert callable(aclose)
 
 
+def test_build_client_config_sets_a_generous_a2a_timeout():
+    """httpx's 5s default livelocked a gemini-2.5-pro negotiation - one LLM
+    turn on the peer outran the initiator's read timeout, which held one
+    connection open for the whole exchange."""
+    from agent import A2A_CLIENT_TIMEOUT_SECONDS, build_client_config
+
+    cfg = build_client_config("http://127.0.0.1:9001", auth=False)  # no token fetch
+    assert cfg.streaming is True
+    assert cfg.httpx_client.timeout.read == A2A_CLIENT_TIMEOUT_SECONDS
+    assert A2A_CLIENT_TIMEOUT_SECONDS >= 60
+
+
 class _FakeWorldClient:
     """Stand-in for an mcp Client used as `async with client as session`.
     One shared `script` of outcomes and a shared `pos` cursor across every

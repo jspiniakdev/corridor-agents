@@ -51,6 +51,11 @@ WORLD_RETRY_CAP_SECONDS = 30.0
 WORLD_TOKEN_MAX_AGE_SECONDS = 2400  # re-mint the OIDC token after 40min - real lifetime is ~1h
 MAX_LOCAL_WORLD_ATTEMPTS = 3  # without --serve, a dead world should surface after a few tries, not hang forever
 
+# A2A client timeout - well above one LLM turn on the peer (gemini-2.5-pro thinks;
+# a cold Cloud Run peer adds startup) since the initiator holds one connection open
+# for the whole negotiation. httpx's 5s default livelocked a pro negotiation.
+A2A_CLIENT_TIMEOUT_SECONDS = 90.0
+
 
 def _make_policy(args):
     """Parsed CLI args -> a policy for this robot. The deterministic
@@ -152,19 +157,25 @@ def get_id_token(audience):
 
 
 def build_client_config(peer_url, auth):
-    """None (a2a-sdk's own default) unless --auth is set - a plain local
-    or Compose run has no GCP credentials configured at all and should
-    never try to fetch a token it doesn't need. When set, hands
-    create_client() an httpx.AsyncClient with the OIDC token already
-    attached as a header - every request through it, including the
-    initial AgentCard fetch, carries it automatically (D33)."""
-    if not auth:
-        return None
+    """The A2A client config. Always sets a generous httpx timeout:
+    httpx's default is 5s, but one LLM turn on the far side
+    (gemini-2.5-pro *thinks*; a cold Cloud Run peer adds startup) runs
+    5-6s+, and the initiator holds one connection open for the whole
+    negotiation reading a stream of events - the D15 heartbeat is a single
+    WORKING event per turn, it doesn't bridge the gap before the reply.
+    Under the 5s default the initiator times out mid-negotiation and
+    re-dials forever while the peer, which already decided, waits forever
+    (a livelock - the networked path has no tie_break() equivalent).
+
+    With --auth (D33) the OIDC bearer token rides on every request through
+    this client, including the initial AgentCard fetch."""
     import httpx
     from a2a.client import ClientConfig
 
-    token = get_id_token(peer_url)
-    return ClientConfig(httpx_client=httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}))
+    headers = {"Authorization": f"Bearer {get_id_token(peer_url)}"} if auth else {}
+    return ClientConfig(
+        httpx_client=httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(A2A_CLIENT_TIMEOUT_SECONDS))
+    )
 
 
 def world_token_audience(world_url):

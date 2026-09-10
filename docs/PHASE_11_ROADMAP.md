@@ -3,7 +3,7 @@
 *Roadmap. No file-level implementation plan yet — that comes per sub-phase,
 starting with 11a once 10b-3 and the `--firestore` visualizer are closed. This
 document will be folded into `PLAN.md` (replacing the "Phase 11+" section) and
-`DECISIONS.md` (a new D43) when 11a work begins; kept standalone until then.*
+`DECISIONS.md` (a new entry) when 11a work begins; kept standalone until then.*
 
 ---
 
@@ -202,8 +202,9 @@ single lost North encounter, which collapses a multi-robot run fast. **Baseline
 10 is the recommendation**, 18–22 reserved for explicitly urgent robots — final
 number to confirm against a real 11a run.
 
-Correct outcome per encounter = the higher-`urgency` (closer-to-death) robot goes
-first.
+Correct outcome per encounter = the robot with the shorter remaining
+time-to-death (`life / urgency`) goes first. At the start of a run that's just
+the higher-`urgency` robot; it diverges later as waiting robots lose life.
 
 ### Run and config
 - **Run length: 280 ticks** — ~6 laps, ~12 corridor crossings per robot.
@@ -217,10 +218,12 @@ first.
   the stakes in `situation` stay hidden from policies — only the prose is shown.
 - **Starter configs:**
   - **`duel`** (11a) — R1 TL/CW urgency 18, R2 TR/CCW urgency 5. They meet
-    head-on at North, then South, then North… repeatedly. Expected: R1 wins every
-    time, R2 yields and slowly bleeds but survives; R1 never waits.
-  - **`standoff`** — both urgency 20, both `never_yield` → deadlock at the first
-    corridor → both bleed out. Confirms deadlock is lethal and death works.
+    head-on at North, then South, then North… repeatedly. Hypothesis under test:
+    R1 (closer to death) wins most crossings, R2 yields and bleeds slowly but
+    survives.
+  - **`standoff`** (11a) — both urgency 20, both given "hold firm" situations →
+    should deadlock at the first corridor and both bleed out. Confirms deadlock
+    is lethal and death works.
   - **`crowd`** (11b) — 6 robots, mixed corners / directions / urgency.
     Exercises queuing and "winner passes, re-negotiate".
 
@@ -277,62 +280,59 @@ first.
 
 ## Sub-phases
 
-Each leaves something runnable. Deterministic policies carry 11a–11b so the whole
-thing is testable with no API cost before an LLM is involved.
+Each leaves something runnable. LLM policies (Claude / Gemini) from 11a on — the
+classic scripted policies don't read `life` / `drain`, so they can't tell us
+whether the survival mechanic works. `world.py`'s collision safety is covered by
+**policy-free** `reactive_filter` / `step` unit tests, so the suite stays fast
+and free regardless.
 
-### 11a — the loop, ≤2 robots, deterministic, in-process
-Rewrite `world.py` to the loop model. Two robots, opposite directions,
-circulating. Generalised `reactive_filter`. Continuous run (tick budget). Life /
-urgency / death. Per-corridor priority. `simulate.py` adapted. `negotiation.py`
-untouched.
-**Done when:** zero collisions over a long run; both robots lap the track and
-contest both corridors repeatedly; a robot forced to wait bleeds down and can
-die; `simulate.py` prints a survival summary.
+### 11a — loop world, 2 LLM robots, in-process
+The `world.py` rewrite (loop coords, lanes, two corridors, generalised
+`reactive_filter`, continuous run, life / urgency / death), driven by two Claude
+or Gemini robots. `SYSTEM` reframed for the loop; `observation.py` loop-aware.
+**This is the world-refinement phase** — corridor placement, drain / `life` /
+run-length, sensor lead-time and the drain-start choice all get tuned against
+what real negotiations do here.
+**Done when:** a full run completes with zero collisions (asserted), both robots
+lap and re-negotiate both corridors, a robot made to wait can die, and the world
+numbers are locked.
 
-### 11b — N robots (3–8), deterministic, in-process
-Corner/direction spawn config. Queues behind corridor mouths; "winner passes,
-re-negotiate". Per-corridor pairwise contests. `scenarios.py` → per-robot list.
-`world_eval.py` → survival / throughput / fairness aggregates over seeded runs.
-**Done when:** an 8-robot run resolves cleanly with deterministic policies, no
-collision, no starvation deadlock; the eval sweep produces stable numbers.
+### 11b — N robots (3–8), in-process
+Corner/direction spawn config; queues + "winner passes, re-negotiate";
+`scenarios.py` → per-robot list; `world_eval.py` → survival / throughput /
+fairness aggregates. FCFS-with-no-negotiation is the baseline number; an optional
+life-aware `yield_unless_dying` policy is the rational control. Correctness = the
+robot with the lower remaining time-to-death (`life / drain`) at the encounter
+goes first.
+**Done when:** an 8-robot run resolves cleanly — no collision, no starvation
+deadlock — and the sweep produces stable numbers.
 
-### 11c — LLM policies, continuous
-`SYSTEM` prompt reframed: quantified stakes ("you lose N life/tick while stopped;
-you have M left"), "this is one of many crossings", no "opposite ends" language.
-`observation.py` loop-aware. Cross-provider (Claude / Gemini) as today.
-**Done when:** LLM robots circulate and negotiate live; the closer-to-death robot
-wins materially more often than chance; a policy visibly exploits a peer that
-keeps yielding.
-
-### 11d — networked, N processes
+### 11c — networked, N processes + deploy
 `get_observation` returns the far-mouth contender (name + URL) → discovery.
-`agent.py` de-sided. Per-corridor dial/priority state. `world_store` /
-`world_server` robots-map doc. Deploy as N Cloud Run services (generalise the
-D41 three-service pattern); Firestore-backed loop world.
-**Done when:** N deployed robot services circulate a deployed loop world, contest
-corridors over real A2A + OIDC, one Cloud Trace per crossing; the visualizer
-replays a fully deployed continuous run.
+`agent.py` de-sided (`--name` / `--advertise-url`, no `--peer-url`). Per-corridor
+dial / priority state. `world_store` / `world_server` robots-map doc. Deploy as N
+Cloud Run services (generalise the D41 three-service pattern).
+**Done when:** N deployed robot services circulate a deployed loop world over
+real A2A + OIDC, one Cloud Trace per crossing, the visualizer replays it.
 
-### 11e — memory / reputation (deferred, own design later)
-Robots recognise repeat opponents; trust, retaliation, and exploitation over
-repeated encounters. Needs a persistent per-robot store of past crossings and a
-policy that reads it. Explicitly **out of scope** until 11a–11d are done — this
-is where the "different objectives" pressure gets most interesting and deserves
-its own planning pass.
+### 11d — memory / reputation (own design pass)
+Robots recognise repeat opponents; trust, retaliation, exploitation over repeated
+encounters. Needs a persistent per-robot store of past crossings and a policy
+that reads it. Out of scope until 11a–11c land — this is where the "different
+objectives" pressure gets most interesting.
 
 ---
 
 ## Deliberately deferred
-- **Replenishment / charging cells** — 11a–11e run finite. Charging adds a
+- **Replenishment / charging cells** — 11a–11d run finite. Charging adds a
   routing dimension; revisit as a Phase 12 experiment.
 - **Passing on 2-lane sections** — directional lanes only. Overtaking is a second
   negotiation type; a later variant.
-- **Dead robot as obstacle** — removed, not left in place. (The blocking-death
-  threat still exists implicitly: a death *in* a corridor during 11a's
-  one-at-a-time rule can't happen mid-transit under "drains only while yielding",
-  so this stays simple.)
-- **Dynamic join/leave** — spawn is start-only through 11d. A robot joining a
-  running world is what would finally justify a registry; pair it with 11e.
+- **Dead robot as obstacle** — removed, not left in place. A death *in* a
+  corridor can't happen anyway: the winner is moving (never drains), the loser
+  waits at the boundary (never enters), so nobody dies mid-corridor.
+- **Dynamic join/leave** — spawn is start-only through 11c. A robot joining a
+  running world is what would finally justify a registry; pair it with 11d.
 - **N-way (k>2) negotiation** — not needed. The loop keeps every contest 2-robot.
 - **Pub/Sub, Firestore registry** — replaced by world-mediated discovery.
 - **3D / real simulator / ROS** — unchanged from `PLAN.md` §7.
@@ -346,41 +346,44 @@ its own planning pass.
    allowed?
 3. Tick budget / run length for a finite run, and the tick↔"second" mapping for
    the drain rate (`POLL_INTERVAL_SECONDS` is 1.0 today).
-4. The urgency distribution / scenario deck for 3–8 robots.
+4. The urgency distribution / scenario deck (2 robots for 11a, 3–8 for 11b).
 5. Exactly when the negotiation trigger fires relative to the boundary cell on a
    loop (today it's "at boundary + sensed"); confirm it still fires early enough
    given corridor lengths differ.
-6. Whether `world_eval` runs continue to be seeded-deterministic for the LLM
-   phases or move to a fixed transcript replay.
+6. How `world_eval`'s LLM sweeps stay affordable and comparable — seed count,
+   whether transcripts get cached/replayed, how often the full sweep runs.
 
 ---
 
 ## Doc changes this roadmap will drive (when 11a begins)
 - **`PLAN.md`**: mark Phase 9 superseded; replace the "Phase 11+ — the actual
-  project" section with this (11a–11e); renumber the protocol experiments to
+  project" section with this (11a–11d); renumber the protocol experiments to
   Phase 12+. Update §4 diagram (loop, N robots), §6 ("where does the simulator
   run" — now a deployed Service), §9 metrics (add survival / fairness).
-- **`DECISIONS.md`**: new entry (**D43**) — "The O: Phase 9 replaced by Phase 11".
-  Record: why the loop dissolves the N-way fork (directional lanes + 1-lane
-  corridors localise every conflict to 2 robots); why discovery goes through the
-  world, not a registry (kills the Pub/Sub dependency); the life/urgency/death
-  mechanic and its "drain only while yielding" choice; what's deferred (memory,
-  passing, replenishment, obstacle-deaths, dynamic join). "Would change our
-  mind": if same-direction corridor contention or dynamic join turns out to
-  matter early, the registry comes back.
+- **`DECISIONS.md`**: a new entry (next free number) — "The O: Phase 9 replaced
+  by Phase 11". Record: why the loop dissolves the N-way fork (directional lanes
+  + 1-lane corridors localise every conflict to 2 robots); why discovery goes
+  through the world, not a registry (kills the Pub/Sub dependency); the
+  life/urgency/death mechanic and its "drain only counts post-negotiation blocked
+  time" choice; **and the deterministic-policy convention revision** — for
+  Phase 11, test fixtures become policy-free unit tests, the baseline becomes
+  FCFS-no-negotiation (a world mode), and scripted policies drop off the critical
+  path (kept for `run.py` and adversary experiments). "Would change our mind": if
+  same-direction corridor contention or dynamic join turns out to matter early,
+  the registry comes back.
 
 ---
 
 ## Verification (per sub-phase, when built)
-- **11a/11b:** `python simulate.py` (loop config) runs a full tick budget with
-  **zero collisions** (assert in `reactive_filter` tests), robots complete
-  multiple laps, at least one death occurs under an adversarial config;
-  `python world_eval.py` sweep produces stable survival/throughput numbers;
-  full `pytest` green (the collision-impossibility tests are the load-bearing
-  ones).
-- **11c:** live `simulate.py` with `--policy llm` / `gemini`; inspect that the
-  closer-to-death robot wins > chance across ~20 seeded encounters; check the
-  `llm.respond` transcripts show the quantified-stakes reasoning.
-- **11d:** 3-terminal then deployed — N robot processes + loop world; one Cloud
+- **11a:** `pytest` green with the policy-free collision-impossibility tests as
+  the load-bearing ones; `python simulate.py` (loop config, `--policy llm` /
+  `gemini`) runs a full tick budget with **zero collisions** (asserted), both
+  robots lap and re-negotiate both corridors, a robot can die under an
+  adversarial config; the `llm.respond` transcripts show quantified-stakes
+  reasoning.
+- **11b:** an 8-robot run resolves with no collision and no starvation deadlock;
+  `python world_eval.py` sweep produces stable survival / throughput / fairness
+  numbers; the closer-to-death robot wins > FCFS chance across the seeded set.
+- **11c:** 3-terminal then deployed — N robot processes + loop world; one Cloud
   Trace per crossing; `visualize_network.py` replays a continuous run;
   unauthenticated call to any robot / the world → 403.
