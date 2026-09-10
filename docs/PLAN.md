@@ -403,15 +403,18 @@ Split into sub-phases because 10b turned out to be three separate pieces:
      resolved `wait`, nothing applied); `WorldChannel` no longer retries
      `propose_action` (a failed one is re-proposed next poll). Unit +
      local-verified; deploys with #3 (needs the `world` Service).
-  3. **`record_negotiation` / `reset_world` have no episode guard.** A late
-     write from a livelocked earlier episode clobbered `world/current`,
-     leaving a stale transcript on two incompatible clocks — which is what
-     the `--firestore` visualizer choked on. Planned: an `episode_id` the
-     world stamps on reset and every robot→world write carries; mismatched
-     writes rejected. Plus: the world becomes the sole timestamper for
-     anything the replay consumes.
+  3. **`record_negotiation` had no episode guard — FIXED (D44).** A late
+     write from the livelocked episode 1 clobbered `world/current`, leaving
+     a fresh-log/stale-transcript mix. `reset_world()` now mints an
+     `episode_id`; `get_observation` returns it; every robot→world write
+     carries it and mismatches are refused. Plus a per-move `nonce` (true
+     exactly-once `propose_action`, closing D43's residual) and
+     `record_negotiation` re-stamping `resolved_at` on the world's clock.
+     `one_episode` restarts on a mid-run id change. 146 tests;
+     local-verified.
 
-  Then the `visualize_network.py --firestore` render, against clean data.
+  D43 + D44 deploy together (all three Services). Then the
+  `visualize_network.py --firestore` render, against clean data.
 
 ### Phase 11+ — The actual project, indefinitely
 

@@ -147,3 +147,49 @@ def test_reset_clears_the_pacing_state():
     # right after reset, a's first move is allowed despite < min_move_interval
     entry = store.propose("a", "move")
     assert entry["resolved"] == "move"
+
+
+def test_reset_generates_a_fresh_episode_id():
+    store = InMemoryWorldStore()
+    first = store.current_episode_id()
+    assert isinstance(first, str) and first
+    store.reset()
+    assert store.current_episode_id() != first
+
+
+def test_propose_with_a_stale_episode_id_is_refused():
+    """D44: a move tagged with a finished episode's id changes nothing."""
+    store = InMemoryWorldStore(min_move_interval=0)
+    ep = store.current_episode_id()
+
+    stale = store.propose("a", "move", episode_id="some-other-episode")
+    assert stale["resolved"] == "wait" and stale["reason"] == "stale_episode"
+    assert store.get_state().a.position == 1  # held
+    assert store.get_log() == []  # not logged
+
+    ok = store.propose("a", "move", episode_id=ep)
+    assert ok["resolved"] == "move" and store.get_state().a.position == 2
+
+
+def test_propose_is_idempotent_for_a_repeated_nonce():
+    """D44: the same nonce from the same side returns the original
+    outcome, nothing re-applied - a duplicate delivery can't double-move."""
+    store = InMemoryWorldStore(min_move_interval=0)
+
+    r1 = store.propose("a", "move", nonce="n1")
+    assert r1["resolved"] == "move" and store.get_state().a.position == 2
+
+    r2 = store.propose("a", "move", nonce="n1")  # duplicate
+    assert r2 == r1  # same cached entry
+    assert store.get_state().a.position == 2  # NOT 3
+    assert len(store.get_log()) == 1  # not logged twice
+
+    r3 = store.propose("a", "move", nonce="n2")  # a genuinely new move
+    assert r3["resolved"] == "move" and store.get_state().a.position == 3
+
+
+def test_nonce_is_per_side():
+    store = InMemoryWorldStore(min_move_interval=0)
+    store.propose("a", "move", nonce="shared")
+    b = store.propose("b", "move", nonce="shared")  # same string, different side - not a duplicate
+    assert b["resolved"] == "move" and store.get_state().b.position == B_START - 1

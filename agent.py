@@ -26,6 +26,7 @@ import argparse
 import asyncio
 import sys
 import time
+import uuid
 
 sys.path.insert(0, "src")
 
@@ -751,6 +752,7 @@ async def run_robot(
     incoming_active = {"value": False}
     comms_established_at = {"value": None}
     pending_trace = {"value": None}  # D39: a negotiation payload waiting to be handed to the world over MCP - the loop drains it (on_resolved is a sync callback and can't await)
+    episode_holder = {"id": None}  # D44: the world's episode_id, captured from the first observation each episode; robot→world writes carry it, a change means reset_world() ran
     private_situation = me.situation
 
     status_log_path = ROBOT_STATUS_PATH_TEMPLATE.format(side=side) if debug_log else None
@@ -814,6 +816,17 @@ async def run_robot(
                     if tick is not None:
                         tick.set_attribute("world.position", obs["position"])
                         tick.set_attribute("world.at_boundary", obs["at_boundary"])
+
+                    obs_episode = obs.get("episode_id")  # D44
+                    if episode_holder["id"] is None:
+                        episode_holder["id"] = obs_episode
+                    elif obs_episode is not None and obs_episode != episode_holder["id"]:
+                        # reset_world() ran under us (a re-trigger mid-episode) - bail;
+                        # the --serve loop's wait_for_reset picks up the new episode cleanly
+                        print(f"{me.name}: episode changed mid-run - restarting")
+                        log_status("episode changed mid-run - restarting")
+                        return
+
                     if obs["reached_target"]:
                         print(f"{me.name}: reached target")
                         log_status("reached target")
@@ -855,18 +868,25 @@ async def run_robot(
                         # D39: hand the transcript to the world so
                         # visualize_network.py can fetch it (from Firestore,
                         # or over MCP) instead of a local file the deployed
-                        # robot's container would never share.
-                        await mcp_call(world, "record_negotiation", **pending_trace["value"])
+                        # robot's container would never share. D44: tagged
+                        # with the episode so a slow negotiation that
+                        # resolved into the next episode can't clobber it.
+                        await mcp_call(world, "record_negotiation", episode_id=episode_holder["id"], **pending_trace["value"])
                         pending_trace["value"] = None
 
                     action = decide_movement(obs, priority_holder["value"], me.name, other.name)
                     if tick is not None:
                         tick.set_attribute("world.action", action)
                     try:
-                        await mcp_call(world, "propose_action", side=side, action=action)
+                        # D43: not retried - a re-sent "move" could apply twice.
+                        # D44: nonce makes an infra-level re-send idempotent;
+                        # episode_id rejects a stray write from a finished episode.
+                        await mcp_call(
+                            world, "propose_action", side=side, action=action,
+                            episode_id=episode_holder["id"], nonce=uuid.uuid4().hex,
+                        )
                     except Exception as err:
-                        # not retried (D43) - re-propose from fresh ground
-                        # truth on the next poll instead of risking a double move
+                        # re-propose from fresh ground truth on the next poll
                         print(f"{me.name}: propose_action failed ({err!r}) - re-proposing next poll", flush=True)
                         log_status(f"propose_action failed ({err!r})")
 
@@ -886,6 +906,7 @@ async def run_robot(
         incoming_active["value"] = False
         comms_established_at["value"] = None
         pending_trace["value"] = None
+        episode_holder["id"] = None  # D44: re-captured from the first observation of the new episode
         me.situation = private_situation
         print(f"{me.name}: world reset - new episode")
         log_status("new episode")

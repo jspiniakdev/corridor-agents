@@ -144,6 +144,30 @@ def test_reset_world_returns_both_robots_to_start_with_an_empty_log():
     assert ws.get_log() == {"entries": []}
 
 
+def test_get_observation_carries_the_episode_id():
+    reset_state()
+    ep = ws.get_observation("a")["episode_id"]
+    assert isinstance(ep, str) and ep
+    assert ws.get_observation("b")["episode_id"] == ep  # same episode for both sides
+
+
+def test_propose_action_stale_episode_is_refused():
+    reset_state()
+    result = ws.propose_action("a", "move", episode_id="a-finished-episode")
+    assert result == {"accepted": False, "actual_position": 1, "reason": "stale_episode"}
+    assert _state().a.position == 1
+
+
+def test_propose_action_nonce_makes_a_resend_idempotent():
+    reset_state()
+    ep = ws.get_observation("a")["episode_id"]
+    first = ws.propose_action("a", "move", episode_id=ep, nonce="abc")
+    assert first == {"accepted": True, "actual_position": 2}
+    resend = ws.propose_action("a", "move", episode_id=ep, nonce="abc")
+    assert resend == first  # same outcome
+    assert _state().a.position == 2  # not 3
+
+
 def test_propose_action_too_fast_move_is_refused_with_a_reason():
     """D43: a second 'move' from the same side before the world's minimum
     interval comes back accepted=False, reason='too_fast', position held -
@@ -169,10 +193,26 @@ def test_record_and_get_negotiation_round_trip():
     assert ws.get_negotiation() == {"negotiation": None}
 
     msgs = [{"speaker": "Robot A", "intent": "propose", "goes_first": "Robot A", "text": "me first", "timestamp": 1.0}]
-    assert ws.record_negotiation(msgs, 0.5, 2.0) == {"recorded": 1}
+    assert ws.record_negotiation(msgs, 0.5, 2.0) == {"recorded": 1, "stale": False}
 
-    assert ws.get_negotiation() == {
-        "negotiation": {"messages": msgs, "comms_established_at": 0.5, "resolved_at": 2.0}
-    }
+    stored = ws.get_negotiation()["negotiation"]
+    assert stored["messages"] == msgs
+    assert stored["comms_established_at"] == 0.5
+    assert isinstance(stored["resolved_at"], float)  # D44: re-stamped with the world's clock, not the passed 2.0
+
     ws.reset_world()
     assert ws.get_negotiation() == {"negotiation": None}
+
+
+def test_record_negotiation_from_a_stale_episode_is_refused():
+    """D44: a transcript tagged with a finished episode's id doesn't
+    clobber world/current - the livelocked-episode-1 bug."""
+    reset_state()
+    current = ws.get_observation("a")["episode_id"]
+    msgs = [{"speaker": "Robot A", "intent": "propose", "goes_first": "Robot A", "text": "x", "timestamp": 1.0}]
+
+    assert ws.record_negotiation(msgs, 0.5, 2.0, episode_id="not-the-current-one") == {"recorded": 0, "stale": True}
+    assert ws.get_negotiation() == {"negotiation": None}  # untouched
+
+    assert ws.record_negotiation(msgs, 0.5, 2.0, episode_id=current)["recorded"] == 1
+    assert ws.get_negotiation()["negotiation"]["messages"] == msgs

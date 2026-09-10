@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import sys
 import time
+import uuid
 
 sys.path.insert(0, "src")
 
@@ -62,6 +63,21 @@ DOCUMENT = "current"
 # a re-sent propose_action (a retried MCP call, a second Cloud Run instance) so a
 # network hiccup can't inject an extra cell of movement the robot never decided.
 MIN_MOVE_INTERVAL_SECONDS = 0.75
+
+
+def _stale_entry(side: str, action: str, a_pos: int, b_pos: int, now: float) -> dict:
+    """The 'this write is from a finished episode' marker (D44) - same
+    shape as a real log entry (so callers unwrap it uniformly) but never
+    logged or applied."""
+    return {
+        "side": side,
+        "action": action,
+        "resolved": "wait",
+        "a_position": a_pos,
+        "b_position": b_pos,
+        "timestamp": now,
+        "reason": "stale_episode",
+    }
 
 
 def grid_facts() -> dict:
@@ -149,27 +165,38 @@ class InMemoryWorldStore:
     a fake `now` to exercise the throttle deterministically."""
 
     def __init__(self, min_move_interval: float = MIN_MOVE_INTERVAL_SECONDS, now=None):
-        self._state = state_from_positions(A_START, B_START)
-        self._negotiation = None
         self._min_move_interval = min_move_interval
         self._now = now or time.time
-        self._last_move_at = {"a": None, "b": None}
+        self.reset()
 
     def get_state(self) -> WorldState:
         return self._state
 
-    def propose(self, side: str, action: str) -> dict:
+    def current_episode_id(self) -> str:
+        return self._episode_id
+
+    def propose(self, side: str, action: str, episode_id: str | None = None, nonce: str | None = None) -> dict:
+        if episode_id is not None and episode_id != self._episode_id:
+            return _stale_entry(side, action, self._state.a.position, self._state.b.position, self._now())
+        if nonce is not None and self._nonces.get(side) == nonce:
+            return self._last_result[side]  # a duplicate delivery - the original outcome, nothing re-applied (D44)
         entry = _resolve(
             self._state, side, action, self._last_move_at, self._now(), self._min_move_interval
         )
         self._state.log.append(entry)
+        if nonce is not None:
+            self._nonces[side] = nonce
+            self._last_result[side] = entry
         return entry
 
     def get_log(self) -> list[dict]:
         return list(self._state.log)
 
-    def set_negotiation(self, data: dict | None) -> None:
+    def set_negotiation(self, data: dict | None, episode_id: str | None = None) -> bool:
+        if episode_id is not None and episode_id != self._episode_id:
+            return False
         self._negotiation = data
+        return True
 
     def get_negotiation(self) -> dict | None:
         return self._negotiation
@@ -178,6 +205,9 @@ class InMemoryWorldStore:
         self._state = state_from_positions(A_START, B_START)
         self._negotiation = None
         self._last_move_at = {"a": None, "b": None}
+        self._episode_id = uuid.uuid4().hex
+        self._nonces = {"a": None, "b": None}
+        self._last_result = {"a": None, "b": None}
 
 
 class FirestoreWorldStore:
@@ -210,7 +240,11 @@ class FirestoreWorldStore:
         d = self._doc.get().to_dict()
         return state_from_positions(d["a_position"], d["b_position"])
 
-    def propose(self, side: str, action: str) -> dict:
+    def current_episode_id(self) -> str | None:
+        self._ensure()
+        return self._doc.get().to_dict().get("episode_id")
+
+    def propose(self, side: str, action: str, episode_id: str | None = None, nonce: str | None = None) -> dict:
         self._ensure()
         firestore = self._firestore
         doc = self._doc
@@ -220,19 +254,25 @@ class FirestoreWorldStore:
         @firestore.transactional
         def run(txn):
             snap = doc.get(transaction=txn).to_dict()
+            if episode_id is not None and episode_id != snap.get("episode_id"):
+                return _stale_entry(side, action, snap["a_position"], snap["b_position"], time.time())
+            cached = snap.get(f"last_result_{side}")
+            if nonce is not None and snap.get(f"nonce_{side}") == nonce and cached is not None:
+                return cached  # duplicate delivery - the original outcome, nothing re-applied (D44)
             state = state_from_positions(snap["a_position"], snap["b_position"])
             last_move_at = {"a": snap.get("last_move_a"), "b": snap.get("last_move_b")}
             entry = _resolve(state, side, action, last_move_at, min_interval=min_interval)
-            txn.update(
-                doc,
-                {
-                    "a_position": state.a.position,
-                    "b_position": state.b.position,
-                    "last_move_a": last_move_at["a"],
-                    "last_move_b": last_move_at["b"],
-                    "log": firestore.ArrayUnion([entry]),
-                },
-            )
+            update = {
+                "a_position": state.a.position,
+                "b_position": state.b.position,
+                "last_move_a": last_move_at["a"],
+                "last_move_b": last_move_at["b"],
+                "log": firestore.ArrayUnion([entry]),
+            }
+            if nonce is not None:
+                update[f"nonce_{side}"] = nonce
+                update[f"last_result_{side}"] = entry
+            txn.update(doc, update)
             return entry
 
         return run(self._db.transaction())
@@ -241,9 +281,12 @@ class FirestoreWorldStore:
         self._ensure()
         return self._doc.get().to_dict().get("log", [])
 
-    def set_negotiation(self, data: dict | None) -> None:
+    def set_negotiation(self, data: dict | None, episode_id: str | None = None) -> bool:
         self._ensure()
+        if episode_id is not None and episode_id != self._doc.get().to_dict().get("episode_id"):
+            return False
         self._doc.update({"negotiation": data})
+        return True
 
     def get_negotiation(self) -> dict | None:
         self._ensure()
@@ -258,6 +301,11 @@ class FirestoreWorldStore:
                 "negotiation": None,
                 "last_move_a": None,
                 "last_move_b": None,
+                "episode_id": uuid.uuid4().hex,
+                "nonce_a": None,
+                "nonce_b": None,
+                "last_result_a": None,
+                "last_result_b": None,
                 "reset_at": self._firestore.SERVER_TIMESTAMP,
             }
         )

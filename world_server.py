@@ -32,6 +32,7 @@ robot's own guess is provisional until the world confirms it).
 
 import argparse
 import sys
+import time
 
 sys.path.insert(0, "src")
 
@@ -89,11 +90,12 @@ def get_observation(side: str) -> dict:
             "in_zone": me.in_zone,
             "reached_target": me.reached_target,
             "other_cleared_zone": other.cleared_zone,
+            "episode_id": _store.current_episode_id(),  # D44: the robot tags its writes with this; a new one means reset_world() ran
         }
 
 
 @mcp.tool()
-def propose_action(side: str, action: str) -> dict:
+def propose_action(side: str, action: str, episode_id: str | None = None, nonce: str | None = None) -> dict:
     """One robot commits an action - move or wait. Validated synchronously
     against reactive_filter (unchanged from world.py) using CURRENT ground
     truth, and applied immediately if safe. The other robot's action is
@@ -103,16 +105,19 @@ def propose_action(side: str, action: str) -> dict:
     Returns the real outcome: accepted (was "move" actually honored, or
     downgraded to "wait") and this robot's real position afterward - the
     robot's own belief was only ever provisional. A "move" is downgraded
-    either by the safety check or (D43) by the "too fast" floor - a move
-    less than MIN_MOVE_INTERVAL_SECONDS after this side's last accepted
-    one; the latter adds reason="too_fast" so a caller can tell pacing
-    from safety. Both just mean "didn't move, look again next poll".
+    either by the safety check, by (D43) the "too fast" floor (a move less
+    than MIN_MOVE_INTERVAL_SECONDS after this side's last accepted one -
+    reason="too_fast"), or by (D44) `episode_id` not matching the current
+    episode (a stray write from a finished one - reason="stale_episode").
+    `nonce` (D44) makes the call idempotent: the same nonce from the same
+    side returns the original outcome, nothing re-applied. All non-accepted
+    cases just mean "didn't move, look again next poll".
     """
     if action not in ("move", "wait"):
         raise ValueError('action must be "move" or "wait"')
 
     with tracing.span("world.propose_action", side=side, action=action) as s:
-        entry = _store.propose(side, action)
+        entry = _store.propose(side, action, episode_id, nonce)
         position = entry["a_position"] if side == "a" else entry["b_position"]
         if s is not None:
             s.set_attribute("world.resolved", entry["resolved"])
@@ -144,19 +149,34 @@ def get_log() -> dict:
 
 
 @mcp.tool()
-def record_negotiation(messages: list, comms_established_at: float, resolved_at: float) -> dict:
+def record_negotiation(
+    messages: list, comms_established_at: float, resolved_at: float, episode_id: str | None = None
+) -> dict:
     """The robot that held the full negotiation transcript hands it to the
     world once the negotiation concludes (D39), so visualize_network.py
     can fetch it alongside the movement log - the same job the local
     negotiation_trace.json file does for a pure-local run, but reachable
-    when the robots ran on Cloud Run. Stored on the current episode;
-    reset_world() clears it. Same shape agent.py's write_negotiation_trace
-    writes: messages carry a per-entry `timestamp` (D29)."""
-    with tracing.span("world.record_negotiation"):
-        _store.set_negotiation(
-            {"messages": messages, "comms_established_at": comms_established_at, "resolved_at": resolved_at}
+    when the robots ran on Cloud Run. Same shape agent.py's
+    write_negotiation_trace writes: messages carry a per-entry `timestamp`
+    (D29).
+
+    D44: `episode_id` must match the current episode or the write is
+    refused (returns recorded=0, stale=true) - this is what stops a
+    negotiation that resolved slowly, well into the *next* episode, from
+    clobbering world/current (the bug that left the visualizer a
+    fresh-log/stale-transcript mix). `resolved_at` is re-stamped with the
+    world's own clock here - the one moment on the same clock as the
+    movement log, so the replay can place the negotiation on the
+    timeline without trusting a robot's wall clock. The passed value and
+    `comms_established_at` stay for the local trace file's use."""
+    with tracing.span("world.record_negotiation") as s:
+        accepted = _store.set_negotiation(
+            {"messages": messages, "comms_established_at": comms_established_at, "resolved_at": time.time()},
+            episode_id,
         )
-        return {"recorded": len(messages)}
+        if s is not None:
+            s.set_attribute("world.accepted", accepted)
+        return {"recorded": len(messages) if accepted else 0, "stale": not accepted}
 
 
 @mcp.tool()

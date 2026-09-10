@@ -1780,3 +1780,71 @@ guard), which is the same "world validates a client-supplied token" shape.
 correct (`a=8 b=1`), a manual same-side double-send refused with `too_fast`.
 **Deploy:** needs the `world` Service (not just the robots), so it batches with
 D44.
+
+---
+
+## D44 — episode_id stale-write guard + propose_action move nonce
+
+**Two bugs, same shape.** (1) `world/current` on the deployed system held a *fresh
+movement log stitched to a stale negotiation transcript* - the transcript from
+the livelocked episode 1, whose `record_negotiation` landed ~100 s late, after
+episode 2's `reset_world` had already cleared the field. That mix is what the
+`--firestore` visualizer choked on. (2) D43's "too fast" floor closes a re-sent
+`propose_action("move")` that arrives inside 0.75 s, but not one that arrives
+later (a Cloud Run infra retry of a POST whose response was lost).
+
+Both are "a client write the world should have recognised as not-for-now".
+
+**Decided — one `episode_id`, one per-move `nonce`, both client-supplied, both
+validated by the world:**
+
+- **`reset_world()` mints a fresh `episode_id`** (uuid4 hex), stored in the doc /
+  in-memory alongside positions. `get_observation` returns it.
+- **The robot captures it** from the first observation of each episode
+  (`episode_holder`), and every robot→world write carries it. `wait_for_reset`
+  clears it so the next episode re-captures. `one_episode` also **bails if the id
+  changes mid-run** - a re-trigger while a robot is still moving now restarts
+  cleanly instead of two episodes bleeding together.
+- **`record_negotiation(…, episode_id)`** - refused (`{recorded: 0, stale: true}`,
+  field untouched) if it doesn't match. This is the direct fix for bug 1.
+- **`propose_action(…, episode_id, nonce)`** - a stale `episode_id` →
+  `reason: "stale_episode"`, nothing applied. A repeated `nonce` from the same
+  side → the *original* outcome returned, nothing re-applied - true exactly-once,
+  closing D43's residual (bug 2). The nonce is a fresh `uuid4().hex` per
+  `propose_action` call; an infra-level re-send resends the identical body, so
+  the world sees the same nonce.
+- Lives in the stores (`InMemoryWorldStore` fields; `FirestoreWorldStore` doc
+  fields `episode_id` / `nonce_a` / `nonce_b` / `last_result_a` / `last_result_b`,
+  read+written in the existing transaction). `_resolve` / `world.py` /
+  `simulate.py` unchanged. `InMemoryWorldStore.__init__` now just calls
+  `reset()`.
+
+**Part C, folded in:** `record_negotiation` re-stamps `resolved_at` with the
+world's own clock (the moment it's called ≈ negotiation end, on the same clock as
+the movement log) instead of trusting the robot's `time.time()`. This is the one
+field the visualizer feeds to `find_step_at_or_after` against the world log, so
+it's the one that has to be on the world's clock. `comms_established_at` stays
+robot-side - it's the same episode, seconds not minutes from `resolved_at`, so
+NTP-close is fine; the −78 s gap that broke the replay was the *stale transcript*
+(fixed by the guard above), never real clock skew. The passed `resolved_at` /
+`comms_established_at` also stay in the arguments for the local trace file.
+
+**Transition note:** a pre-D44 Firestore doc has no `episode_id` →
+`current_episode_id()` returns None → robots capture None → writes go unchecked
+(None is the "skip the check" sentinel). The first `trigger_episode.py` after
+deploy runs `reset()`, which writes `episode_id`; from then on it's enforced. So
+the first deployed episode must (as always) be preceded by a trigger.
+
+**Verified:** 146 unit tests; live 3-terminal - three episodes back to back
+(clean, `--serve` lifecycle intact); and against the live world directly: a
+stale `episode_id` refused (`stale_episode`), a repeated nonce idempotent
+(position held), a stale `record_negotiation` refused with `world/current`
+untouched.
+
+**Deploys with D43** (all three Services - `world` included).
+
+**Would change our mind:** the `FirestoreWorldStore.set_negotiation` episode
+check is a read-then-write, not transactional - a TOCTOU window exists but
+`record_negotiation` fires once per episode from one robot and `reset` happens
+between episodes, so a real race needs a >1-episode-long clock skew. If that ever
+bites, fold it into a transaction like `propose`.

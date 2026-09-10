@@ -345,12 +345,24 @@ applied, `reason: "too_fast"`. Per-side; `wait` never throttled. Lives in
 `propose_action` (`retry=False` in `mcp_call`) - a failed one is re-proposed
 next poll; the collision path is unaffected (a safety refusal is a
 successful `accepted:false`, never an exception). 138 tests; local-verified.
-**Still open:** `record_negotiation` has no episode guard (a late write from
-a prior episode clobbered `world/current` - the stale transcript the
-visualizer choked on). Next: D44 - an `episode_id` the world stamps on
-reset and every robot→world write carries (+ a move nonce for true
-exactly-once), and the world as sole timestamper. D43+D44 deploy together
-(both need the `world` Service). See the design memory / `PLAN.md` §5.
+**D44: episode_id stale-write guard + move nonce.** Two bugs of one shape -
+a stale `record_negotiation` (the livelocked episode 1's transcript,
+landing ~100s late, clobbered fresh `world/current` - the mix the
+visualizer choked on) and a re-sent `propose_action` landing *after*
+D43's 0.75s window. `reset_world()` mints a fresh `episode_id`;
+`get_observation` returns it; the robot captures it per episode
+(`episode_holder`) and every robot→world write carries it - mismatches
+refused (`record_negotiation` → `{recorded:0, stale:true}`;
+`propose_action` → `reason:"stale_episode"`). `propose_action` also takes
+a per-call `nonce` (`uuid4().hex`) - a repeat returns the original
+outcome, nothing re-applied → true exactly-once. `one_episode` restarts
+on a mid-run id change; `record_negotiation` re-stamps `resolved_at` on
+the world's clock. Stores hold it (`FirestoreWorldStore`: `episode_id` /
+`nonce_a`/`nonce_b` / `last_result_a`/`last_result_b` doc fields in the
+txn); `_resolve`/`world.py`/`simulate.py` untouched. 146 tests;
+local-verified (3 episodes clean; stale id + repeat nonce + stale
+transcript all refused live). **D43+D44 deploy together** (all three
+Services). See the design memory / `PLAN.md` §5.
 
 **Cost note:** the two robot Services bill ~$15-40/mo combined even idle
 (`--min-instances=1`). Delete them between demos - `--min-instances=0` isn't
@@ -361,14 +373,14 @@ a `world.py` rewrite plus a real N-way-negotiation design fork, and the
 discovery/broadcast half (Firestore registry, Pub/Sub) only earns its keep
 at 3+ robots. Staying at 2 robots.
 
-**Next:** (1) D42 deployed (robot-a/b) - watch ~1-2h for zero `exit(1)`
-across a token boundary; (2) D44 - `episode_id` stale-write guard + move
-nonce + world-as-sole-timestamper, then deploy D43+D44 (all three
-Services); (3) *then* fix the `visualize_network.py --firestore` render to
-close 10b-3b-ii, on clean data; (4) Phase 8 - Claude-on-Vertex still
-**blocked on a GCP quota increase** (auto-denied, support ticket open); once
-it clears, `--policy claude` on Vertex is a policy swap, not an infra
-change (D36). See `PLAN.md` §5.
+**Next:** (1) D42 deployed (robot-a/b) - watch for zero `exit(1)` across a
+token boundary; (2) deploy D43+D44 (all three Services), preceded by a
+`trigger_episode.py`; (3) *then* fix the `visualize_network.py --firestore`
+render to close 10b-3b-ii, on clean data (`resolved_at` now correlates with
+the world log); (4) Phase 8 - Claude-on-Vertex still **blocked on a GCP
+quota increase** (auto-denied, support ticket open); once it clears,
+`--policy claude` on Vertex is a policy swap, not an infra change (D36).
+See `PLAN.md` §5.
 
 ## How to run things
 
