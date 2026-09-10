@@ -1,7 +1,10 @@
 # Corridor Agents — Project Plan
 
 *A learning project in multi-agent robotics coordination.*
-*Last updated: 2026-08-16 · Status: planning, no code committed*
+*Last updated: 2026-09-09 · Status: Phases 1–7 done; Phase 8 partial (Vertex
+flag-gated, quota-blocked); Phase 9 deferred (staying at 2 robots); Phase 10
+split into 10a (done) + 10b-1/2/3. See `docs/DECISIONS.md` D1–D36 for the
+real record; this file is the north-star plan, kept roughly current.*
 
 ---
 
@@ -281,7 +284,7 @@ differently, but the local setup now matches what the cloud will run — which i
 what makes Phase 8 boring instead of miserable.
 
 ### Phase 8 — Deploy
-**~1 weekend, plus an IAM tax · Infra: Cloud Run, Secret Manager, Vertex AI**
+**~1 weekend, plus an IAM tax · Infra: Cloud Run, ~~Secret Manager~~, Vertex AI**
 
 One agent to Cloud Run first, then the rest. Each agent gets **its own service
 account**, and agents authenticate to each other with OIDC ID tokens.
@@ -293,7 +296,17 @@ under one auth system and one bill.
 
 Budget an extra half-day for IAM specifically. Everyone loses time there.
 
-### Phase 9 — Three or more robots
+**Actual state (D33, D34, D36):** OIDC agent-to-agent auth done and verified
+live (`robot-b` a locked-down Service, `robot-a` a Job). Claude-on-Vertex is
+built as a flag (`--vertex`, D34) but **not live-verified** — the fresh
+project's `anthropic-claude-sonnet` quota is 0 and the increase was
+auto-denied (support ticket open). **Secret Manager was dropped** (D34): on
+the Vertex path there's no API key left to protect. A `GeminiPolicy` (D36,
+`--policy gemini`) was added as a multi-provider exercise — and since
+Gemini's Vertex quota *is* non-zero, it's the way the deployed pipeline gets
+exercised while the Claude quota is stuck.
+
+### Phase 9 — Three or more robots — **DEFERRED**
 **~6h · Infra: Pub/Sub, Firestore**
 
 Two agents can just talk to each other. Three need **discovery** (who exists?)
@@ -303,11 +316,54 @@ carries announcements.
 
 *This is the phase where "multi-agent system" starts being literally true.*
 
-### Phase 10 — See what's happening
-**~4h · Infra: OpenTelemetry → Cloud Trace**
+**Deferred by choice.** N robots means a `world.py` rewrite (positions/
+collision are pairwise and hardcoded to A/B) plus a real N-way-negotiation
+design fork (2 robots decide one binary; 3+ need an *ordering*, with no
+central coordinator per §4.2). The discovery/broadcast half only earns its
+keep at 3+ robots. Staying at 2 for now. The Firestore *dependency* still
+arrives early — via Phase 10b-2 below, for world state, not the registry.
 
-Every A2A message becomes a span. Debugging a three-way negotiation from raw
+### Phase 10 — See what's happening
+**Infra: OpenTelemetry → Cloud Trace**
+
+Every A2A message becomes a span. Debugging a multi-step negotiation from raw
 logs is genuinely miserable, and by this point that's what we'd be doing.
+Split into sub-phases because 10b turned out to be three separate pieces:
+
+- **10a — negotiation-path tracing (local). DONE (D35).** `agent.py --trace`,
+  off by default via a stdlib-only `src/tracing.py` no-op shim.
+  `negotiation.episode` → `negotiation.turn` → `llm.respond` (model, token
+  counts) on the initiator, `negotiation.handle` on the responder, plus
+  a2a-sdk's own task-lifecycle spans (free once a `TracerProvider` exists).
+  httpx + FastAPI instrumentation links the two robot processes into one
+  trace. Verified live, including on the Gemini-via-Vertex path.
+
+- **10b-1 — MCP world-path tracing (local). DONE (D37).**
+  `world_server.py --trace` → `world.get_observation` / `world.propose_action`
+  spans; `agent.py`'s `run_robot` loop → `world.episode` → `world.tick` →
+  `mcp.<tool>`; `--webhook` initiator gets its `negotiation.episode` span
+  (the one D35 skipped). Verified live across 3 processes — the world's
+  handling nests into the calling robot's trace. `tracing.span()` is now
+  dual-protocol (`with` and `async with`). No new infra.
+
+- **10b-2 — Firestore-backed world (Option C).** Replace `world_server.py`'s
+  in-memory `STATE` singleton with a Firestore document, so the world can
+  survive Cloud Run's multi-instance / recycle model. `propose_action`
+  becomes a `@firestore.transactional` read-modify-write (two instances can
+  call it at once). Episode lifecycle becomes explicit (one doc per episode;
+  resetting it is "new episode" — the same trigger a future control UI would
+  use). Local dev runs against the Firestore emulator, no GCP needed. New
+  dep: `google-cloud-firestore`.
+
+- **10b-3 — deploy + Cloud Trace verification.** `world_server.py` as a
+  Cloud Run **Service** (own service account, `roles/datastore.user`,
+  `--no-allow-unauthenticated`). Both robots redeploy with `--world-url` →
+  they now run `run_robot` (server + mover), so **`robot-a` converts from a
+  Job to a Service** (the D33 "would change our mind" case). Robots run
+  `--policy gemini --trace` with `OTEL_TRACES_EXPORTER=gcp`; verify the
+  trace tree spans all three services in the Cloud Trace console. Ends with
+  three long-lived Cloud Run Services — world, robot-a, robot-b — plus
+  Firestore.
 
 ### Phase 11+ — The actual project, indefinitely
 

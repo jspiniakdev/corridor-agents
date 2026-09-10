@@ -21,7 +21,6 @@ whole point of Phase 10 (D35).
 
 from __future__ import annotations
 
-import contextlib
 import os
 
 _on = False
@@ -30,21 +29,49 @@ _provider = None
 _scenario = None
 
 
-@contextlib.contextmanager
-def span(name: str, **attrs):
-    """A real span when setup() has run, a plain no-op context manager
-    otherwise. Yields the span object (or None when off) so callers can
-    attach attributes they only know after the fact - token counts, say."""
-    if not _on:
-        yield None
-        return
-    with _tracer.start_as_current_span(name) as s:
+class _Span:
+    """A span usable in both `with` and `async with` - the world loop
+    needs `async with Client(...), tracing.span(...)`, everything else
+    uses a plain `with`. A no-op (yields None) until setup() runs."""
+
+    def __init__(self, name: str, attrs: dict):
+        self._name = name
+        self._attrs = attrs
+        self._cm = None
+
+    def _enter(self):
+        if not _on:
+            return None
+        self._cm = _tracer.start_as_current_span(self._name)
+        s = self._cm.__enter__()
         if _scenario:
             s.set_attribute("corridor.scenario", _scenario)
-        for k, v in attrs.items():
+        for k, v in self._attrs.items():
             if v is not None:
                 s.set_attribute(k, v)
-        yield s
+        return s
+
+    def _exit(self, *exc):
+        return self._cm.__exit__(*exc) if self._cm is not None else False
+
+    def __enter__(self):
+        return self._enter()
+
+    def __exit__(self, *exc):
+        return self._exit(*exc)
+
+    async def __aenter__(self):
+        return self._enter()
+
+    async def __aexit__(self, *exc):
+        return self._exit(*exc)
+
+
+def span(name: str, **attrs) -> _Span:
+    """A real span when setup() has run, a no-op otherwise. Yields the
+    span object (or None when off) so callers can attach attributes they
+    only know after the fact - token counts, say."""
+    return _Span(name, attrs)
 
 
 def setup(service_name: str, scenario: str | None = None) -> None:
@@ -97,6 +124,19 @@ def instrument_fastapi(app) -> None:
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
     FastAPIInstrumentor.instrument_app(app)
+
+
+def instrument_asgi(app):
+    """Same job as instrument_fastapi() for a bare ASGI/Starlette app -
+    world_server.py's MCP server (10b-1). Wraps rather than mutates
+    (no FastAPIInstrumentor equivalent for a plain Starlette app), so
+    RETURNS the app to use: the wrapped one when tracing is on, the
+    original untouched otherwise."""
+    if not _on:
+        return app
+    from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
+
+    return OpenTelemetryMiddleware(app)
 
 
 def shutdown() -> None:

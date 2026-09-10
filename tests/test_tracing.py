@@ -29,6 +29,24 @@ def test_instrument_fastapi_is_a_noop_when_off():
     tracing.instrument_fastapi(object())  # would explode if it tried to use the arg
 
 
+def test_instrument_asgi_returns_the_app_unchanged_when_off():
+    """10b-1: world_server.py does `app = tracing.instrument_asgi(app)` -
+    when tracing is off it must hand back the exact same app object."""
+    app = object()
+    assert tracing.instrument_asgi(app) is app
+
+
+def test_span_works_as_an_async_context_manager_too():
+    """10b-1: run_robot uses `async with Client(...), tracing.span(...)`."""
+    import asyncio
+
+    async def use_it():
+        async with tracing.span("x", a=1) as s:
+            return s
+
+    assert asyncio.run(use_it()) is None
+
+
 def test_importing_negotiation_does_not_turn_tracing_on():
     import negotiation  # noqa: F401
 

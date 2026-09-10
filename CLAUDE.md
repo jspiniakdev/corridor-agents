@@ -241,11 +241,23 @@ stdlib-only no-op until `--trace`, so `run.py`/`eval.py`/tests pay nothing.
 Cross-process linking verified: the initiator's `POST` span is the parent
 of the responder's `POST /` span, one connected trace across both robot
 processes. Exporter from `OTEL_TRACES_EXPORTER` (`console` default, `gcp`
-for Cloud Trace). **10b (deferred, bundled with the Cloud Run redeploy):**
-tracing the MCP world path + `--webhook` initiator, live Cloud Trace
-verification, and **Option C** - moving the world to the cloud properly
-(Firestore-backed `WorldState`, replacing `world_server.py`'s in-memory
-singleton).
+for Cloud Trace).
+
+**Phase 10b-1 done (D37): MCP world-path tracing.** `world_server.py --trace`
+→ `world.get_observation` / `world.propose_action` spans; `run_robot`'s
+`--world-url` loop → `world.episode` → `world.tick` → `mcp.<tool>`;
+`--webhook` initiator finally gets its `negotiation.episode` span too.
+`tracing.span()` is now dual-protocol (`with` and `async with`). Verified
+live across 3 processes - the world's tool-handling spans nest into the
+calling robot's trace. `mcp` (like a2a-sdk) ships its own OTel spans, free
+once a `TracerProvider` exists. Still local-only.
+
+**10b-2 / 10b-3 remain:** Option C (Firestore-backed `WorldState`, replacing
+`world_server.py`'s in-memory singleton so the world survives Cloud Run's
+multi-instance model), then deploy all three as Cloud Run Services
+(`robot-a` converts Job→Service) with `--policy gemini --trace` and
+`OTEL_TRACES_EXPORTER=gcp`, and verify the trace tree in Cloud Trace. See
+`PLAN.md` §5.
 
 **Phase 9 (three or more robots) is deliberately skipped for now** - it's
 a `world.py` rewrite plus a real N-way-negotiation design fork, and the
@@ -262,7 +274,7 @@ out Phase 8 and 10b together. See `PLAN.md` §5.
 
 ```bash
 source .venv/bin/activate        # Python 3.13; required in each new shell
-python -m pytest tests/ -q       # 113 tests, no API calls, ~0.03s
+python -m pytest tests/ -q       # 115 tests, no API calls, ~0.03s
 python run.py                    # one negotiation, deterministic policies
 python run.py --a llm --b llm    # needs: cp .env.example .env && source .env
 python eval.py                   # measurement sweep, deterministic cases only

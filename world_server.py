@@ -36,6 +36,8 @@ import time
 
 sys.path.insert(0, "src")
 
+import tracing  # noqa: E402 - Phase 10b-1, no-op unless --trace calls tracing.setup()
+
 from negotiation import Robot  # noqa: E402
 from observation import distance_to_entrance  # noqa: E402
 from world import (  # noqa: E402
@@ -108,21 +110,26 @@ def get_observation(side: str) -> dict:
     place that actually knows both real positions. It's what lets a robot
     judge whether the other is anywhere near ALSO being about to
     negotiate, versus sensed-but-nowhere-close."""
-    me = _robot_state(side)
-    other = _other_state(side)
-    gap = abs(me.position - other.position)
-    sensed = gap <= SENSOR_RANGE
-    return {
-        "position": me.position,
-        "distance_to_entrance": distance_to_entrance(me.position, me.direction, CORRIDOR_ZONE),
-        "sensed_other": sensed,
-        "gap_if_sensed": gap if sensed else None,
-        "other_distance_to_boundary": abs(other.position - other.boundary) if sensed else None,
-        "at_boundary": me.at_boundary,
-        "in_zone": me.in_zone,
-        "reached_target": me.reached_target,
-        "other_cleared_zone": other.cleared_zone,
-    }
+    with tracing.span("world.get_observation", side=side) as s:
+        me = _robot_state(side)
+        other = _other_state(side)
+        gap = abs(me.position - other.position)
+        sensed = gap <= SENSOR_RANGE
+        if s is not None:
+            s.set_attribute("world.position", me.position)
+            s.set_attribute("world.at_boundary", me.at_boundary)
+            s.set_attribute("world.sensed_other", sensed)
+        return {
+            "position": me.position,
+            "distance_to_entrance": distance_to_entrance(me.position, me.direction, CORRIDOR_ZONE),
+            "sensed_other": sensed,
+            "gap_if_sensed": gap if sensed else None,
+            "other_distance_to_boundary": abs(other.position - other.boundary) if sensed else None,
+            "at_boundary": me.at_boundary,
+            "in_zone": me.in_zone,
+            "reached_target": me.reached_target,
+            "other_cleared_zone": other.cleared_zone,
+        }
 
 
 @mcp.tool()
@@ -140,17 +147,23 @@ def propose_action(side: str, action: str) -> dict:
     if action not in ("move", "wait"):
         raise ValueError('action must be "move" or "wait"')
 
-    if side == "a":
-        resolved, _ = reactive_filter(STATE, action, "wait")
-        apply(STATE, resolved, "wait")
-        position = STATE.a.position
-    else:
-        _, resolved = reactive_filter(STATE, "wait", action)
-        apply(STATE, "wait", resolved)
-        position = STATE.b.position
+    with tracing.span("world.propose_action", side=side, action=action) as s:
+        if side == "a":
+            resolved, _ = reactive_filter(STATE, action, "wait")
+            apply(STATE, resolved, "wait")
+            position = STATE.a.position
+        else:
+            _, resolved = reactive_filter(STATE, "wait", action)
+            apply(STATE, "wait", resolved)
+            position = STATE.b.position
 
-    STATE.log.append((side, action, resolved, STATE.a.position, STATE.b.position, time.time()))
-    return {"accepted": resolved == action, "actual_position": position}
+        STATE.log.append((side, action, resolved, STATE.a.position, STATE.b.position, time.time()))
+        if s is not None:
+            s.set_attribute("world.resolved", resolved)
+            s.set_attribute("world.accepted", resolved == action)
+            s.set_attribute("world.a_position", STATE.a.position)
+            s.set_attribute("world.b_position", STATE.b.position)
+        return {"accepted": resolved == action, "actual_position": position}
 
 
 @mcp.tool()
@@ -187,10 +200,28 @@ def main():
         default="0.0.0.0",
         help="Phase 7: 0.0.0.0 (not 127.0.0.1) so other containers on the same Compose network can reach this one - still reachable via localhost for plain local runs too.",
     )
+    parser.add_argument(
+        "--trace",
+        action="store_true",
+        help="Phase 10b-1/D35: emit OpenTelemetry spans - world.get_observation / world.propose_action per tool call, under the incoming request's trace, so a robot's mcp.* client span and this server's handling nest into one tree. Off by default. Exporter from OTEL_TRACES_EXPORTER (console / gcp).",
+    )
     args = parser.parse_args()
 
     print(f"world server listening on http://{args.host}:{args.port}")
-    mcp.run(transport="streamable-http", host=args.host, port=args.port, stateless_http=True)
+    if args.trace:
+        # Build the Starlette app ourselves so it can be wrapped for
+        # traceparent extraction - mcp.run() does exactly this internally
+        # (streamable_http_app + uvicorn) with no seam to instrument.
+        import uvicorn
+
+        tracing.setup("world")
+        app = tracing.instrument_asgi(mcp.streamable_http_app(stateless_http=True, host=args.host))
+        try:
+            uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+        finally:
+            tracing.shutdown()
+    else:
+        mcp.run(transport="streamable-http", host=args.host, port=args.port, stateless_http=True)
 
 
 if __name__ == "__main__":

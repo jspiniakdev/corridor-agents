@@ -268,57 +268,59 @@ async def run_initiator_webhook(me, other, peer_url, webhook_port, max_turns, ho
     context_id = None
 
     try:
-        while True:
-            if check_agreement(history) is not None or len(history) >= max_turns:
-                return report_outcome(me, history, max_turns), history, message_times
+        with tracing.span("negotiation.episode", role="initiator", robot=me.name, peer=peer_url, webhook=True):
+            while True:
+                if check_agreement(history) is not None or len(history) >= max_turns:
+                    return report_outcome(me, history, max_turns), history, message_times
 
-            my_message = me.policy.respond(me, other, history, max_turns)
-            print(f"  {my_message}")
-            history.append(my_message)
-            message_times.append(time.time())
+                with tracing.span("negotiation.turn", turn=len(history)):
+                    my_message = me.policy.respond(me, other, history, max_turns)
+                    print(f"  {my_message}")
+                    history.append(my_message)
+                    message_times.append(time.time())
 
-            a2a_message = new_data_message(
-                message_to_dict(my_message), role=Role.ROLE_USER, task_id=task_id, context_id=context_id
-            )
-            configuration = SendMessageConfiguration(
-                return_immediately=True,
-                task_push_notification_config=TaskPushNotificationConfig(url=webhook_url),
-            )
-            request = SendMessageRequest(message=a2a_message, configuration=configuration)
+                    a2a_message = new_data_message(
+                        message_to_dict(my_message), role=Role.ROLE_USER, task_id=task_id, context_id=context_id
+                    )
+                    configuration = SendMessageConfiguration(
+                        return_immediately=True,
+                        task_push_notification_config=TaskPushNotificationConfig(url=webhook_url),
+                    )
+                    request = SendMessageRequest(message=a2a_message, configuration=configuration)
 
-            async for response in client.send_message(request):
-                if response.HasField("task"):
-                    task_id = response.task.id
-                    context_id = response.task.context_id
-                break  # return_immediately - this is just the ack, not the answer
+                    async for response in client.send_message(request):
+                        if response.HasField("task"):
+                            task_id = response.task.id
+                            context_id = response.task.context_id
+                        break  # return_immediately - this is just the ack, not the answer
 
-            print(f"  ({me.name} is free - waiting for {other.name}'s callback, not holding the line)")
+                    print(f"  ({me.name} is free - waiting for {other.name}'s callback, not holding the line)")
 
-            # the task-creation event that came back synchronously above
-            # also gets pushed here again (SUBMITTED) - along with the
-            # WORKING heartbeat - before the real answer; skip anything
-            # that isn't actually a turn worth acting on
-            not_yet_an_answer = {TaskState.TASK_STATE_SUBMITTED, TaskState.TASK_STATE_WORKING}
-            final_state = None
-            peer_reply_parts = None
-            while final_state is None:
-                response = await incoming.get()
-                state, parts = extract_reply(response)
-                if state in not_yet_an_answer:
-                    if state == TaskState.TASK_STATE_WORKING:
-                        print(f"  ({other.name} is working...)")
-                    continue
-                final_state = state
-                peer_reply_parts = parts
+                    # the task-creation event that came back synchronously above
+                    # also gets pushed here again (SUBMITTED) - along with the
+                    # WORKING heartbeat - before the real answer; skip anything
+                    # that isn't actually a turn worth acting on
+                    not_yet_an_answer = {TaskState.TASK_STATE_SUBMITTED, TaskState.TASK_STATE_WORKING}
+                    final_state = None
+                    peer_reply_parts = None
+                    while final_state is None:
+                        response = await incoming.get()
+                        state, parts = extract_reply(response)
+                        if state in not_yet_an_answer:
+                            if state == TaskState.TASK_STATE_WORKING:
+                                print(f"  ({other.name} is working...)")
+                            continue
+                        final_state = state
+                        peer_reply_parts = parts
 
-            if peer_reply_parts is not None:
-                peer_reply = message_from_dict(get_data_parts(peer_reply_parts)[0])
-                print(f"  {peer_reply}")
-                history.append(peer_reply)
-                message_times.append(time.time())
+                    if peer_reply_parts is not None:
+                        peer_reply = message_from_dict(get_data_parts(peer_reply_parts)[0])
+                        print(f"  {peer_reply}")
+                        history.append(peer_reply)
+                        message_times.append(time.time())
 
-            if final_state == TaskState.TASK_STATE_COMPLETED:
-                return report_outcome(me, history, max_turns), history, message_times
+                if final_state == TaskState.TASK_STATE_COMPLETED:
+                    return report_outcome(me, history, max_turns), history, message_times
     finally:
         server.should_exit = True
         await server_task
@@ -434,10 +436,14 @@ async def run_responder_async(
 
 async def mcp_call(client, name, **args):
     """Call an MCP tool and unwrap its JSON payload - every world_server.py
-    tool returns a dict serialized into the one text content block."""
+    tool returns a dict serialized into the one text content block. The
+    mcp.<name> span (10b-1) is the client end of the world channel; the
+    httpx POST and world_server's own world.<name> span nest under it via
+    traceparent."""
     import json
 
-    result = await client.call_tool(name, args)
+    with tracing.span(f"mcp.{name}", **args):
+        result = await client.call_tool(name, args)
     return json.loads(result.content[0].text)
 
 
@@ -636,47 +642,53 @@ async def run_robot(
     )
 
     try:
-        async with Client(world_url) as world:
+        async with Client(world_url) as world, tracing.span("world.episode", robot=me.name, side=side):
             while True:
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
-                obs = await mcp_call(world, "get_observation", side=side)
-                me.situation = compose_observation_from_dict(obs, other.name, private_situation)
-                if obs["reached_target"]:
-                    print(f"{me.name}: reached target")
-                    log_status("reached target")
-                    return
+                with tracing.span("world.tick") as tick:
+                    obs = await mcp_call(world, "get_observation", side=side)
+                    me.situation = compose_observation_from_dict(obs, other.name, private_situation)
+                    if tick is not None:
+                        tick.set_attribute("world.position", obs["position"])
+                        tick.set_attribute("world.at_boundary", obs["at_boundary"])
+                    if obs["reached_target"]:
+                        print(f"{me.name}: reached target")
+                        log_status("reached target")
+                        return
 
-                if priority_holder["value"] is None and obs["at_boundary"]:
-                    if not obs["sensed_other"]:
-                        priority_holder["value"] = me.name
-                        print(f"{me.name}: at boundary alone - claiming priority")
-                        log_status("at boundary alone - claiming priority")
-                    elif dial_holder["task"] is None and not incoming_active["value"]:
-                        print(f"{me.name}: at boundary, sensing {other.name} - dialing")
-                        log_status(f"at boundary, sensing {other.name} - dialing")
-                        comms_established_at["value"] = time.time()
-                        dial_holder["task"] = asyncio.create_task(
-                            negotiate_as_initiator(me, other, peer_url, max_turns, webhook_port, auth=auth)
-                        )
+                    if priority_holder["value"] is None and obs["at_boundary"]:
+                        if not obs["sensed_other"]:
+                            priority_holder["value"] = me.name
+                            print(f"{me.name}: at boundary alone - claiming priority")
+                            log_status("at boundary alone - claiming priority")
+                        elif dial_holder["task"] is None and not incoming_active["value"]:
+                            print(f"{me.name}: at boundary, sensing {other.name} - dialing")
+                            log_status(f"at boundary, sensing {other.name} - dialing")
+                            comms_established_at["value"] = time.time()
+                            dial_holder["task"] = asyncio.create_task(
+                                negotiate_as_initiator(me, other, peer_url, max_turns, webhook_port, auth=auth)
+                            )
 
-                dial_task = dial_holder["task"]
-                if dial_task is not None and dial_task.done():
-                    if not dial_task.cancelled():
-                        error = dial_task.exception()
-                        if error is not None:
-                            # a real robot doesn't die because it called a
-                            # peer a moment too early - log it and let a
-                            # fresh dial get scheduled on the next poll
-                            print(f"{me.name}: dial failed ({error}) - will retry")
-                            log_status(f"dial failed ({error}) - will retry")
-                        else:
-                            priority_holder["value"], dial_history, dial_message_times = dial_task.result()
-                            log_status(f"dial resolved: {priority_holder['value']}")
-                            write_negotiation_trace(dial_history, dial_message_times, comms_established_at["value"], time.time())
-                    dial_holder["task"] = None
+                    dial_task = dial_holder["task"]
+                    if dial_task is not None and dial_task.done():
+                        if not dial_task.cancelled():
+                            error = dial_task.exception()
+                            if error is not None:
+                                # a real robot doesn't die because it called a
+                                # peer a moment too early - log it and let a
+                                # fresh dial get scheduled on the next poll
+                                print(f"{me.name}: dial failed ({error}) - will retry")
+                                log_status(f"dial failed ({error}) - will retry")
+                            else:
+                                priority_holder["value"], dial_history, dial_message_times = dial_task.result()
+                                log_status(f"dial resolved: {priority_holder['value']}")
+                                write_negotiation_trace(dial_history, dial_message_times, comms_established_at["value"], time.time())
+                        dial_holder["task"] = None
 
-                action = decide_movement(obs, priority_holder["value"], me.name, other.name)
-                await mcp_call(world, "propose_action", side=side, action=action)
+                    action = decide_movement(obs, priority_holder["value"], me.name, other.name)
+                    if tick is not None:
+                        tick.set_attribute("world.action", action)
+                    await mcp_call(world, "propose_action", side=side, action=action)
     finally:
         server.should_exit = True
         await server_task
