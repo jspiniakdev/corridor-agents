@@ -220,8 +220,13 @@ open); construction is unit-tested.
 **GeminiPolicy added (D36): the negotiation policy, reimplemented against a
 second provider.** `--policy gemini` runs Claude's exact negotiation
 contract against Gemini via Vertex (`google-genai`, ADC auth), reusing
-`--vertex-project`/`--vertex-region` + a new `--gemini-model` (default
-`gemini-2.5-flash`). Shared unchanged: the `SYSTEM` prompt,
+`--vertex-project`/`--vertex-region` + a new `--gemini-model` (code default
+`gemini-2.5-flash`; the deployed robots run `--gemini-model gemini-2.5-pro`
+- pro reasons about the actual stakes instead of grasping at a bogus
+"I'm closer" proximity claim, and resolves in ~2 messages vs flash's ~5.
+`GeminiPolicy._budgets(model)` handles the difference: flash disables
+thinking (`thinking_budget=0`), pro can't - it takes a bounded budget
+(512) + a 2048 ceiling). Shared unchanged: the `SYSTEM` prompt,
 `message_from_tool_call()`, `_log_raw()`, the `llm.respond` span, and the
 entire negotiation loop / executor / wire / world integration. Provider-
 specific and nothing else: SDK, tool-schema dialect, forced-tool-use knob,
