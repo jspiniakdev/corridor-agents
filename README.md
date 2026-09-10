@@ -1,11 +1,10 @@
 # Corridor Agents
 
-Simulated robots that negotiate with each other to share physical space. Each
+Simulated robots that negotiate with each other using LLM models to share physical space based on their oen understanding of urgency and criticality. Each
 robot knows something private the others don't, and eventually each will be a
 separate networked service.
 
-A learning project: agent-to-agent protocols, agent design, and cloud infra —
-introduced one layer at a time.
+Project goal is to experiment with i) LLM policy,  ii) agent design , iii) agent-to-agent protocols, iv) MCP design , v) cloud infra for agents, vi) agents negotiations for robotics
 
 **Status: Phase 3 complete.** Two robots negotiate over a real 1D grid and
 their decision causes actual movement, with a structural guarantee they can
