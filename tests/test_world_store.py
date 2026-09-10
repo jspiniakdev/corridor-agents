@@ -47,8 +47,9 @@ def test_resolve_downgrades_an_unsafe_move_to_wait():
 def test_inmemory_store_matches_raw_world_py_over_a_sequence():
     """The D17 guarantee: routing through the store changes nothing about
     the outcome vs. calling reactive_filter/apply on a world.py WorldState
-    directly."""
-    store = InMemoryWorldStore()
+    directly. min_move_interval=0 disables the D43 pacing floor, which is
+    orthogonal to the safety semantics this asserts."""
+    store = InMemoryWorldStore(min_move_interval=0)
     ref = WorldState(
         RobotState(store.get_state().a.robot, A_START, 1, 2, 8),
         RobotState(store.get_state().b.robot, B_START, -1, 6, 1),
@@ -92,7 +93,7 @@ def test_grid_facts_has_the_keys_world_servers_get_map_promised():
 
 
 def test_inmemory_store_log_and_reset():
-    store = InMemoryWorldStore()
+    store = InMemoryWorldStore(min_move_interval=0)
     store.propose("a", "move")
     store.propose("a", "move")
     assert len(store.get_log()) == 2
@@ -102,3 +103,47 @@ def test_inmemory_store_log_and_reset():
     assert store.get_state().a.position == A_START
     assert store.get_state().b.position == B_START
     assert store.get_log() == []
+
+
+def test_too_fast_move_is_refused_and_nothing_applied():
+    """D43: a 'move' less than min_move_interval after this side's last
+    accepted move resolves to 'wait', reason='too_fast', position held."""
+    clock = [1000.0]
+    store = InMemoryWorldStore(min_move_interval=1.0, now=lambda: clock[0])
+
+    first = store.propose("a", "move")
+    assert first["resolved"] == "move" and store.get_state().a.position == 2
+
+    clock[0] += 0.3  # too soon
+    second = store.propose("a", "move")
+    assert second["resolved"] == "wait"
+    assert second["reason"] == "too_fast"
+    assert store.get_state().a.position == 2  # held
+
+    clock[0] += 1.0  # now enough time has passed
+    third = store.propose("a", "move")
+    assert third["resolved"] == "move"
+    assert "reason" not in third
+    assert store.get_state().a.position == 3
+
+
+def test_too_fast_is_per_side_and_wait_is_never_throttled():
+    clock = [0.0]
+    store = InMemoryWorldStore(min_move_interval=1.0, now=lambda: clock[0])
+
+    store.propose("a", "move")  # a moves at t=0
+    b_entry = store.propose("b", "move")  # b has never moved - allowed even at t=0
+    assert b_entry["resolved"] == "move"
+
+    a_wait = store.propose("a", "wait")  # wait right after a's move - never throttled
+    assert a_wait["resolved"] == "wait" and "reason" not in a_wait
+
+
+def test_reset_clears_the_pacing_state():
+    clock = [0.0]
+    store = InMemoryWorldStore(min_move_interval=5.0, now=lambda: clock[0])
+    store.propose("a", "move")
+    store.reset()
+    # right after reset, a's first move is allowed despite < min_move_interval
+    entry = store.propose("a", "move")
+    assert entry["resolved"] == "move"

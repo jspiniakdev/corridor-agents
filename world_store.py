@@ -55,6 +55,14 @@ from world import (  # noqa: E402
 COLLECTION = "world"
 DOCUMENT = "current"
 
+# D43: the world's own hard floor on how fast a robot may advance - a "move"
+# accepted less than this after that side's previous accepted move is refused
+# ("too fast"), nothing applied. Kept below agent.py's POLL_INTERVAL_SECONDS
+# (1.0) so normal once-a-second polling is never throttled; it exists to absorb
+# a re-sent propose_action (a retried MCP call, a second Cloud Run instance) so a
+# network hiccup can't inject an extra cell of movement the robot never decided.
+MIN_MOVE_INTERVAL_SECONDS = 0.75
+
 
 def grid_facts() -> dict:
     """The static grid constants, in the exact shape world_server.py's
@@ -82,41 +90,78 @@ def state_from_positions(a_position: int, b_position: int) -> WorldState:
     return WorldState(a, b)
 
 
-def _resolve(state: WorldState, side: str, action: str) -> dict:
+def _resolve(
+    state: WorldState,
+    side: str,
+    action: str,
+    last_move_at: dict | None = None,
+    now: float | None = None,
+    min_interval: float = MIN_MOVE_INTERVAL_SECONDS,
+) -> dict:
     """Run one robot's proposed action through the reactive safety filter
     and apply it to `state` (mutates in place). The other robot is fixed
     as "wait" - only one robot transitions per call, so there's nothing
     for it to race against (world_server.py's D17 model, unchanged).
     Returns the log entry, which carries everything the caller needs:
-    the resolved action and both post-move positions."""
-    if side == "a":
+    the resolved action and both post-move positions.
+
+    D43: if `last_move_at` (a {"a": ts|None, "b": ts|None} dict the store
+    owns) is given and this side moved less than `min_interval` ago, the
+    "move" is refused - resolved "wait", nothing applied, entry tagged
+    reason="too_fast" - and `last_move_at[side]` is updated only on an
+    accepted move. `last_move_at=None` skips the check entirely (the pure
+    reactive-filter path, used by the direct unit tests)."""
+    now = time.time() if now is None else now
+    too_fast = (
+        action == "move"
+        and last_move_at is not None
+        and last_move_at.get(side) is not None
+        and now - last_move_at[side] < min_interval
+    )
+    if too_fast:
+        resolved = "wait"
+    elif side == "a":
         resolved, _ = reactive_filter(state, action, "wait")
         apply(state, resolved, "wait")
     else:
         _, resolved = reactive_filter(state, "wait", action)
         apply(state, "wait", resolved)
-    return {
+    if resolved == "move" and last_move_at is not None:
+        last_move_at[side] = now
+    entry = {
         "side": side,
         "action": action,
         "resolved": resolved,
         "a_position": state.a.position,
         "b_position": state.b.position,
-        "timestamp": time.time(),
+        "timestamp": now,
     }
+    if too_fast:
+        entry["reason"] = "too_fast"
+    return entry
 
 
 class InMemoryWorldStore:
-    """Today's behavior: one WorldState in this process's memory."""
+    """Today's behavior: one WorldState in this process's memory.
 
-    def __init__(self):
+    min_move_interval / now (D43): the "too fast" floor and its clock,
+    both injectable - tests pass min_move_interval=0 for the pure path or
+    a fake `now` to exercise the throttle deterministically."""
+
+    def __init__(self, min_move_interval: float = MIN_MOVE_INTERVAL_SECONDS, now=None):
         self._state = state_from_positions(A_START, B_START)
         self._negotiation = None
+        self._min_move_interval = min_move_interval
+        self._now = now or time.time
+        self._last_move_at = {"a": None, "b": None}
 
     def get_state(self) -> WorldState:
         return self._state
 
     def propose(self, side: str, action: str) -> dict:
-        entry = _resolve(self._state, side, action)
+        entry = _resolve(
+            self._state, side, action, self._last_move_at, self._now(), self._min_move_interval
+        )
         self._state.log.append(entry)
         return entry
 
@@ -132,6 +177,7 @@ class InMemoryWorldStore:
     def reset(self) -> None:
         self._state = state_from_positions(A_START, B_START)
         self._negotiation = None
+        self._last_move_at = {"a": None, "b": None}
 
 
 class FirestoreWorldStore:
@@ -141,12 +187,19 @@ class FirestoreWorldStore:
     Cloud Run, any string plus FIRESTORE_EMULATOR_HOST locally). The doc
     is lazily created at start positions on first access."""
 
-    def __init__(self, project: str | None = None, collection: str = COLLECTION, document: str = DOCUMENT):
+    def __init__(
+        self,
+        project: str | None = None,
+        collection: str = COLLECTION,
+        document: str = DOCUMENT,
+        min_move_interval: float = MIN_MOVE_INTERVAL_SECONDS,
+    ):
         from google.cloud import firestore
 
         self._firestore = firestore
         self._db = firestore.Client(project=project)
         self._doc = self._db.collection(collection).document(document)
+        self._min_move_interval = min_move_interval
 
     def _ensure(self) -> None:
         if not self._doc.get().exists:
@@ -162,16 +215,21 @@ class FirestoreWorldStore:
         firestore = self._firestore
         doc = self._doc
 
+        min_interval = self._min_move_interval
+
         @firestore.transactional
         def run(txn):
             snap = doc.get(transaction=txn).to_dict()
             state = state_from_positions(snap["a_position"], snap["b_position"])
-            entry = _resolve(state, side, action)
+            last_move_at = {"a": snap.get("last_move_a"), "b": snap.get("last_move_b")}
+            entry = _resolve(state, side, action, last_move_at, min_interval=min_interval)
             txn.update(
                 doc,
                 {
                     "a_position": state.a.position,
                     "b_position": state.b.position,
+                    "last_move_a": last_move_at["a"],
+                    "last_move_b": last_move_at["b"],
                     "log": firestore.ArrayUnion([entry]),
                 },
             )
@@ -198,6 +256,8 @@ class FirestoreWorldStore:
                 "b_position": B_START,
                 "log": [],
                 "negotiation": None,
+                "last_move_a": None,
+                "last_move_b": None,
                 "reset_at": self._firestore.SERVER_TIMESTAMP,
             }
         )

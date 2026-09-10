@@ -1716,3 +1716,67 @@ long-lived-client cancellation problem above.
 persistent outage in a way that matters — add a max wall-clock budget after which
 even a `--serve` robot exits (and lets Cloud Run restart it clean). Not worth it
 now: the backoff caps at 30s and every attempt logs.
+
+---
+
+## D43 — The world's "too fast" move floor: propose_action idempotency + pacing
+
+**The bug.** In the first deployed episode the movement log showed Robot B
+advancing two cells 0.28 s apart at the start - far under the ~1 s/cell the poll
+loop is supposed to enforce. `propose_action` isn't idempotent: it runs
+`reactive_filter`/`apply` and appends a log entry every time it's called, with no
+notion of "I already did this one". A re-sent `propose_action("move")` - a
+retried MCP call, a POST whose response was merely lost, a second Cloud Run
+instance - applies a *second real cell* of movement the robot never decided on.
+D42's `WorldChannel` retry made this worse, not better: a `propose_action` whose
+first response is lost gets re-sent by the resilience layer itself.
+
+The deeper issue, from the review: **nothing actually controls how fast a robot
+moves.** It's `POLL_INTERVAL_SECONDS` minus processing time, plus whatever the
+transport does on a retry, minus whatever a blocking LLM call steals. The world -
+the one component with authority over the shared corridor - had no say in speed
+at all.
+
+**Decided.** A per-side minimum move interval, enforced by the world.
+`world_store.MIN_MOVE_INTERVAL_SECONDS = 0.75`: a `"move"` accepted less than
+that after *this side's* last accepted move is refused - resolved `"wait"`,
+nothing applied, log entry and `propose_action` response tagged `reason:
+"too_fast"` (distinct from a safety block, which has no reason). `"wait"` is never
+throttled; the check is per-side, so A moving right after B is fine.
+
+- **0.75, below the 1.0 poll interval:** normal once-a-second polling is never
+  throttled (verified live - a full episode, same-side move gaps all ~1.03 s,
+  zero `too_fast`). The floor exists only to absorb the *abnormal* case: a
+  same-side burst. A deliberate immediate double `propose_action("a", "move")`
+  now returns `accepted: true` then `accepted: false, reason: "too_fast"`, position
+  held.
+- **Lives in `world_store._resolve`**, with the `{"a": ts, "b": ts}` timestamp
+  dict owned by each store (`InMemoryWorldStore` in memory, `FirestoreWorldStore`
+  as `last_move_a`/`last_move_b` doc fields, read+written inside the existing
+  transaction). `reset()` clears it. `world.py` stays untouched - `simulate.py`
+  is still pure discrete ticks with no wall clock. `_resolve(last_move_at=None)`
+  is the un-throttled path the direct unit tests use; `min_move_interval=0`
+  disables it for the store-level equivalence tests.
+- **`POLL_INTERVAL_SECONDS` is now explicitly a politeness interval** - how often
+  a robot checks in - not the speed limit. The hard limit is the world's, and a
+  robot can't poll its way past it.
+
+**`WorldChannel` no longer retries `propose_action`.** `call_tool` grew a
+`retry=` flag; `mcp_call` passes `retry=False` for `propose_action` only. A
+re-sent `"move"` whose first response was lost would apply twice; a failed
+`propose_action` is safe to just drop, because the movement loop re-proposes from
+fresh `get_observation` ground truth on its very next poll. `one_episode` wraps
+the call in try/except and logs it. Reads (`get_observation`, `get_log`) and
+`record_negotiation` still retry normally. This does **not** touch the collision
+path: a move the world refuses for *safety* is a successful call returning
+`accepted: false`, never an exception, so it was never retried anyway.
+
+**Doesn't fully close, and why that's OK:** a re-sent move that lands *after* the
+0.75 s window (a slow retry) still applies twice. True exactly-once needs a
+client-supplied move nonce the world dedupes - deferred to D44 (the `episode_id`
+guard), which is the same "world validates a client-supplied token" shape.
+
+**Verified:** 138 unit tests; live 3-terminal - normal episode unthrottled and
+correct (`a=8 b=1`), a manual same-side double-send refused with `too_fast`.
+**Deploy:** needs the `world` Service (not just the robots), so it batches with
+D44.

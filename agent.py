@@ -38,7 +38,7 @@ from wire import history_to_list, message_from_dict, message_to_dict  # noqa: E4
 
 from agent_executor import NegotiationExecutor  # noqa: E402
 
-POLL_INTERVAL_SECONDS = 1.0  # D30: how often a robot checks in with the world - governs movement, waiting, and negotiation-trigger cadence uniformly, not a separate "how long does moving take" model. Slept BEFORE each check-in (top of run_robot()'s loop), not after - so the first check-in is paced too, not a free instant action exempt from the interval.
+POLL_INTERVAL_SECONDS = 1.0  # D30: how often a robot checks in with the world - governs movement, waiting, and negotiation-trigger cadence uniformly, not a separate "how long does moving take" model. Slept BEFORE each check-in (top of run_robot()'s loop), not after - so the first check-in is paced too, not a free instant action exempt from the interval. D43: this is a self-imposed politeness interval; the *hard* floor on movement speed is now the world's (world_store.MIN_MOVE_INTERVAL_SECONDS), which a robot can't poll its way past.
 
 # WorldChannel resilience (D42 fix). The --auth OIDC token lasts ~1h; a --serve
 # robot runs for days, so the world channel builds a fresh client per call and
@@ -267,7 +267,12 @@ class WorldChannel:
         finally:
             await aclose()
 
-    async def call_tool(self, name, args):
+    async def call_tool(self, name, args, *, retry=True):
+        """retry=False (D43): try once, then raise. For propose_action -
+        a re-sent "move" whose first response was merely lost would apply
+        a second cell of movement; the caller's poll loop re-proposes from
+        fresh ground truth anyway, so a failed propose is safe to just
+        drop."""
         attempt = 0
         last_exc = None
         while True:
@@ -293,7 +298,7 @@ class WorldChannel:
                 last_exc = err
             self._token = None  # a failure might be a bad/expired token - re-mint on the next attempt
             attempt += 1
-            if not self._serve and attempt >= MAX_LOCAL_WORLD_ATTEMPTS:
+            if not retry or (not self._serve and attempt >= MAX_LOCAL_WORLD_ATTEMPTS):
                 raise last_exc
             print(f"world call {name!r} failed ({last_exc!r}) - retrying, attempt {attempt}", flush=True)
             await self._sleep(self._backoff(attempt))
@@ -587,7 +592,9 @@ async def mcp_call(client, name, **args):
 
     scalars = {k: v for k, v in args.items() if isinstance(v, (str, int, float, bool))}
     with tracing.span(f"mcp.{name}", **scalars):  # record_negotiation's `messages` list isn't a valid span attr
-        result = await client.call_tool(name, args)
+        # propose_action isn't safe to blind-retry (D43): a re-sent "move"
+        # could apply twice. The movement loop re-proposes next poll anyway.
+        result = await client.call_tool(name, args, retry=(name != "propose_action"))
     return json.loads(result.content[0].text)
 
 
@@ -855,7 +862,13 @@ async def run_robot(
                     action = decide_movement(obs, priority_holder["value"], me.name, other.name)
                     if tick is not None:
                         tick.set_attribute("world.action", action)
-                    await mcp_call(world, "propose_action", side=side, action=action)
+                    try:
+                        await mcp_call(world, "propose_action", side=side, action=action)
+                    except Exception as err:
+                        # not retried (D43) - re-propose from fresh ground
+                        # truth on the next poll instead of risking a double move
+                        print(f"{me.name}: propose_action failed ({err!r}) - re-proposing next poll", flush=True)
+                        log_status(f"propose_action failed ({err!r})")
 
     async def wait_for_reset(world):
         """--serve: idle-poll until reset_world() puts this robot back

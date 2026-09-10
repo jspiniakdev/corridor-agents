@@ -397,10 +397,12 @@ Split into sub-phases because 10b turned out to be three separate pieces:
      `exit(1)`'d on a ~1h cycle. `WorldChannel` now builds a fresh
      authenticated client per call and retries. Verified live 3-terminal
      (kill/restart the world under two `--serve` robots); redeploy pending.
-  2. **`propose_action` is not idempotent.** A re-sent MCP call applies a
-     second real move (the 0.28s double-step in the deployed episode).
-     Planned: a world-side "too fast" minimum-move-interval limiter, which
-     also makes a fast retry a no-op.
+  2. **`propose_action` is not idempotent — FIXED (D43).** A re-sent MCP
+     call applied a second real move (the 0.28s double-step). The world now
+     enforces a per-side 0.75s minimum move interval (`too_fast` →
+     resolved `wait`, nothing applied); `WorldChannel` no longer retries
+     `propose_action` (a failed one is re-proposed next poll). Unit +
+     local-verified; deploys with #3 (needs the `world` Service).
   3. **`record_negotiation` / `reset_world` have no episode guard.** A late
      write from a livelocked earlier episode clobbered `world/current`,
      leaving a stale transcript on two incompatible clocks — which is what

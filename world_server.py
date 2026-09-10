@@ -101,8 +101,12 @@ def propose_action(side: str, action: str) -> dict:
     so there's nothing for it to be racing against.
 
     Returns the real outcome: accepted (was "move" actually honored, or
-    downgraded to "wait" by the safety check) and this robot's real
-    position afterward - the robot's own belief was only ever provisional.
+    downgraded to "wait") and this robot's real position afterward - the
+    robot's own belief was only ever provisional. A "move" is downgraded
+    either by the safety check or (D43) by the "too fast" floor - a move
+    less than MIN_MOVE_INTERVAL_SECONDS after this side's last accepted
+    one; the latter adds reason="too_fast" so a caller can tell pacing
+    from safety. Both just mean "didn't move, look again next poll".
     """
     if action not in ("move", "wait"):
         raise ValueError('action must be "move" or "wait"')
@@ -115,7 +119,12 @@ def propose_action(side: str, action: str) -> dict:
             s.set_attribute("world.accepted", entry["resolved"] == action)
             s.set_attribute("world.a_position", entry["a_position"])
             s.set_attribute("world.b_position", entry["b_position"])
-        return {"accepted": entry["resolved"] == action, "actual_position": position}
+            if "reason" in entry:
+                s.set_attribute("world.reason", entry["reason"])
+        result = {"accepted": entry["resolved"] == action, "actual_position": position}
+        if "reason" in entry:  # D43: "too_fast" - the move was refused for pacing, not safety
+            result["reason"] = entry["reason"]
+        return result
 
 
 @mcp.tool()

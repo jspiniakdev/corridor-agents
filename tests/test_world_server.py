@@ -133,15 +133,35 @@ def test_get_log_timestamps_are_monotonically_non_decreasing():
 
 def test_reset_world_returns_both_robots_to_start_with_an_empty_log():
     reset_state()
-    ws.propose_action("a", "move")
-    ws.propose_action("a", "move")
-    assert _state().a.position == 3
+    ws.propose_action("a", "move")  # each side's first move - not throttled (D43)
+    ws.propose_action("b", "move")
+    assert (_state().a.position, _state().b.position) == (2, B_START - 1)
 
     assert ws.reset_world() == {"reset": True}
 
     assert _state().a.position == 1
     assert _state().b.position == B_START
     assert ws.get_log() == {"entries": []}
+
+
+def test_propose_action_too_fast_move_is_refused_with_a_reason():
+    """D43: a second 'move' from the same side before the world's minimum
+    interval comes back accepted=False, reason='too_fast', position held -
+    distinct from a safety block (no reason)."""
+    from world_store import InMemoryWorldStore
+
+    clock = [100.0]
+    ws._store = InMemoryWorldStore(min_move_interval=1.0, now=lambda: clock[0])
+    try:
+        assert ws.propose_action("a", "move") == {"accepted": True, "actual_position": 2}
+        clock[0] += 0.2
+        assert ws.propose_action("a", "move") == {
+            "accepted": False,
+            "actual_position": 2,
+            "reason": "too_fast",
+        }
+    finally:
+        ws._store = InMemoryWorldStore()
 
 
 def test_record_and_get_negotiation_round_trip():

@@ -246,6 +246,24 @@ def test_world_channel_retries_mid_call_cancellation():
     assert connects == 2
 
 
+def test_world_channel_retry_false_tries_once_then_raises():
+    """D43: propose_action is called with retry=False so a re-sent 'move'
+    can't apply twice - one attempt, then the error surfaces (the caller's
+    poll loop re-proposes)."""
+    ch, spy = _channel([RuntimeError("lost"), "ok"], serve=True)
+
+    async def go():
+        async with ch as world:
+            await world.call_tool("propose_action", {"side": "a", "action": "move"}, retry=False)
+
+    try:
+        asyncio.run(go())
+        assert False, "expected the call to raise"
+    except RuntimeError as err:
+        assert "lost" in str(err)
+    assert spy["connects"] == 1  # tried once, no retry
+
+
 def test_world_channel_backoff_is_capped_and_nondecreasing():
     from agent import WORLD_RETRY_CAP_SECONDS
 

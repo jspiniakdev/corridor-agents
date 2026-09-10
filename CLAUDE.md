@@ -333,13 +333,24 @@ commit `827b356`) - clean episode + robot stdout now legible in Cloud
 Logging; the hourly `exit(1)` should be gone (needs ~1-2h across a token
 boundary to fully confirm). See `DECISIONS.md` D42.
 
-**Also flagged in the same review, not yet fixed:** `propose_action` is not
-idempotent (a re-sent MCP call = a real extra move - the 0.28s double-step
-seen in the deployed episode) and `record_negotiation` has no episode guard
-(a late write from a prior episode clobbered `world/current` - the
-transcript the visualizer choked on). Planned fixes: a world-side "too
-fast" move limiter, an `episode_id` stale-write guard, and making the world
-the sole timestamper. See the design memory / `PLAN.md` §5.
+**D43: the world's "too fast" move floor.** `propose_action` wasn't
+idempotent - a re-sent MCP call (retry, lost response, second instance)
+applied a second real cell of movement (the 0.28s double-step in the first
+deployed episode). `world_store.MIN_MOVE_INTERVAL_SECONDS` (0.75, below the
+1.0 poll interval so normal movement is untouched): a `move` less than that
+after this side's last accepted move is refused - resolved `wait`, nothing
+applied, `reason: "too_fast"`. Per-side; `wait` never throttled. Lives in
+`world_store._resolve` (Firestore: `last_move_a`/`last_move_b` doc fields);
+`world.py`/`simulate.py` untouched. `WorldChannel` also stopped retrying
+`propose_action` (`retry=False` in `mcp_call`) - a failed one is re-proposed
+next poll; the collision path is unaffected (a safety refusal is a
+successful `accepted:false`, never an exception). 138 tests; local-verified.
+**Still open:** `record_negotiation` has no episode guard (a late write from
+a prior episode clobbered `world/current` - the stale transcript the
+visualizer choked on). Next: D44 - an `episode_id` the world stamps on
+reset and every robot→world write carries (+ a move nonce for true
+exactly-once), and the world as sole timestamper. D43+D44 deploy together
+(both need the `world` Service). See the design memory / `PLAN.md` §5.
 
 **Cost note:** the two robot Services bill ~$15-40/mo combined even idle
 (`--min-instances=1`). Delete them between demos - `--min-instances=0` isn't
@@ -350,13 +361,14 @@ a `world.py` rewrite plus a real N-way-negotiation design fork, and the
 discovery/broadcast half (Firestore registry, Pub/Sub) only earns its keep
 at 3+ robots. Staying at 2 robots.
 
-**Next:** (1) redeploy + verify D42 (WorldChannel) live - the ~1h crash loop
-should be gone; (2) the `propose_action` idempotency / `episode_id` guard /
-sole-timestamper fixes from the review; (3) *then* fix the
-`visualize_network.py --firestore` render to close 10b-3b-ii, on clean data;
-(4) Phase 8 - Claude-on-Vertex still **blocked on a GCP quota increase**
-(auto-denied, support ticket open); once it clears, `--policy claude` on
-Vertex is a policy swap, not an infra change (D36). See `PLAN.md` §5.
+**Next:** (1) D42 deployed (robot-a/b) - watch ~1-2h for zero `exit(1)`
+across a token boundary; (2) D44 - `episode_id` stale-write guard + move
+nonce + world-as-sole-timestamper, then deploy D43+D44 (all three
+Services); (3) *then* fix the `visualize_network.py --firestore` render to
+close 10b-3b-ii, on clean data; (4) Phase 8 - Claude-on-Vertex still
+**blocked on a GCP quota increase** (auto-denied, support ticket open); once
+it clears, `--policy claude` on Vertex is a policy swap, not an infra
+change (D36). See `PLAN.md` §5.
 
 ## How to run things
 
