@@ -156,6 +156,27 @@ def build_client_config(peer_url, auth):
     return ClientConfig(httpx_client=httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}))
 
 
+def build_world_client(world_url, auth):
+    """The MCP client for the world channel. Plain Client(url) unless
+    --auth (Phase 10b-3b): a deployed world_server.py Service is locked
+    down with --no-allow-unauthenticated exactly like robot-b, so the
+    robots' MCP calls need the same OIDC bearer token their A2A calls
+    already carry. mcp's high-level Client takes a URL string but gives no
+    header hook - so wrap the streamable-http transport in an
+    httpx2.AsyncClient carrying the token (audience = the world's URL)."""
+    from mcp.client import Client
+
+    if not auth:
+        return Client(world_url)
+
+    import httpx2
+    from mcp.client.streamable_http import streamable_http_client
+
+    token = get_id_token(world_url)
+    authed = httpx2.AsyncClient(headers={"Authorization": f"Bearer {token}"})
+    return Client(streamable_http_client(world_url, http_client=authed))
+
+
 async def run_initiator(me, other, peer_url, max_turns, auth=False):
     """The --side a client loop: send a message, read back whatever the
     responder's TaskUpdater published, and keep going until the task
@@ -533,6 +554,7 @@ async def run_robot(
     host="0.0.0.0",
     advertise_url=None,
     auth=False,
+    serve=False,
 ):
     """--world-url, dynamic initiation (D18): every robot always runs its
     own A2A server AND its own movement loop AND is capable of dialing
@@ -587,9 +609,14 @@ async def run_robot(
     to merge with the world log and negotiation trace on one real
     timeline. Off by default: a normal run doesn't need this file and
     shouldn't pay for it - requested directly, to avoid instrumenting
-    every run just to occasionally debug one."""
-    from mcp.client import Client
+    every run just to occasionally debug one.
 
+    serve (Phase 10b-3b, off by default) keeps the process alive after
+    reaching target: a Cloud Run Service can't just exit. It idle-polls
+    the world until reset_world() puts this robot back before its target
+    (a fresh episode), clears the per-episode state, and runs the next
+    one. Without --serve (a local run), the loop still returns on
+    reached_target exactly as before."""
     priority_holder = {"value": None}
     dial_holder = {"task": None}
     incoming_active = {"value": False}
@@ -646,8 +673,10 @@ async def run_robot(
         advertise_url=advertise_url,
     )
 
-    try:
-        async with Client(world_url) as world, tracing.span("world.episode", robot=me.name, side=side):
+    async def one_episode(world):
+        """One robot's episode: poll the world, negotiate at the boundary
+        if needed, move, return once this robot reaches its target."""
+        with tracing.span("world.episode", robot=me.name, side=side):
             while True:
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
                 with tracing.span("world.tick") as tick:
@@ -705,6 +734,34 @@ async def run_robot(
                     if tick is not None:
                         tick.set_attribute("world.action", action)
                     await mcp_call(world, "propose_action", side=side, action=action)
+
+    async def wait_for_reset(world):
+        """--serve: idle-poll until reset_world() puts this robot back
+        before its target, then clear the per-episode state so the next
+        one starts clean."""
+        print(f"{me.name}: idle - waiting for reset_world")
+        log_status("idle - waiting for reset")
+        while (await mcp_call(world, "get_observation", side=side))["reached_target"]:
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+        dt = dial_holder["task"]
+        if dt is not None and not dt.done():
+            dt.cancel()
+        priority_holder["value"] = None
+        dial_holder["task"] = None
+        incoming_active["value"] = False
+        comms_established_at["value"] = None
+        pending_trace["value"] = None
+        me.situation = private_situation
+        print(f"{me.name}: world reset - new episode")
+        log_status("new episode")
+
+    try:
+        async with build_world_client(world_url, auth) as world:
+            while True:
+                await one_episode(world)
+                if not serve:
+                    return
+                await wait_for_reset(world)
     finally:
         server.should_exit = True
         await server_task
@@ -743,7 +800,12 @@ def main():
     parser.add_argument(
         "--auth",
         action="store_true",
-        help="Phase 8/D33: fetch a real OIDC ID token (audience = peer_url) and attach it as Authorization: Bearer on every outbound A2A call - needed to call a Cloud Run service locked down with --no-allow-unauthenticated. Off by default - a plain local or Compose run has no GCP credentials to fetch a token with and doesn't need one.",
+        help="Phase 8/D33, Phase 10b-3b: fetch a real OIDC ID token (audience = the target URL) and attach it as Authorization: Bearer on every outbound call - A2A to the peer, and (with --world-url) MCP to the world. Needed to reach a Cloud Run service locked down with --no-allow-unauthenticated. Off by default - a plain local or Compose run has no GCP credentials to fetch a token with and doesn't need one.",
+    )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="Phase 10b-3b: with --world-url, keep running after reaching target - idle until reset_world() starts a fresh episode, then run it. For a Cloud Run Service (which can't just exit). Off by default: a local run still ends when the robot reaches its target.",
     )
     parser.add_argument(
         "--vertex",
@@ -807,6 +869,7 @@ def _run(args):
                 args.host,
                 args.advertise_url,
                 args.auth,
+                args.serve,
             )
         )
         return 0

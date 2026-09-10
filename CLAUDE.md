@@ -285,11 +285,23 @@ are unchanged. Verified: a `--firestore` Gemini episode →
 `visualize_network.py --firestore --firestore-project corridor-agents` →
 correct replay (`priority: Robot A`, `correct: true`).
 
-**10b-3b remains:** connect the deployed robots to a deployed world Service
-(`--world-url`) - needs a `run_robot` idle mode (Services can't exit on
-`reached_target`), MCP-over-OIDC (`--auth` only covers A2A today), and
-`robot-a` Job→Service. Then all three run world-integrated and the D39
-visualizer replays a *fully* deployed episode. See `PLAN.md` §5.
+**Phase 10b-3b code done (D40).** `agent.py --serve` (with `--world-url`)
+keeps running after `reached_target` - `run_robot`'s loop is now
+`while True: one_episode(world); if not serve: return; wait_for_reset(world)`,
+where `wait_for_reset` idle-polls until `reset_world()` starts a fresh
+episode and clears the per-episode state. `--auth` now also authenticates
+the MCP world channel (`build_world_client` mints an OIDC token and wraps
+the streamable-http transport), so a locked-down deployed world Service is
+reachable. New `trigger_episode.py` = the "start an episode" button
+(`reset_world` over MCP). Verified live 3-terminal: two `--serve` robots ran
+**3 episodes without restarting**, `trigger_episode.py` between each.
+
+**10b-3b-ii remains (all gcloud):** `world@` SA + `roles/datastore.user` /
+`roles/cloudtrace.agent`; `roles/run.invoker` for the robot SAs on the world
+Service; deploy `world_server.py` as a Service (`--firestore --trace`);
+convert `robot-a` Job→Service; redeploy both with `--world-url --serve`;
+verify the 3-service trace tree + the D39 visualizer replaying a fully
+deployed episode. See `PLAN.md` §5.
 
 **Phase 9 (three or more robots) is deliberately skipped for now** - it's
 a `world.py` rewrite plus a real N-way-negotiation design fork, and the
@@ -306,7 +318,7 @@ out Phase 8 and 10b together. See `PLAN.md` §5.
 
 ```bash
 source .venv/bin/activate        # Python 3.13; required in each new shell
-python -m pytest tests/ -q       # 125 tests, no API calls, ~0.03s
+python -m pytest tests/ -q       # 126 tests, no API calls, ~0.03s
 python run.py                    # one negotiation, deterministic policies
 python run.py --a llm --b llm    # needs: cp .env.example .env && source .env
 python eval.py                   # measurement sweep, deterministic cases only
@@ -337,6 +349,11 @@ python agent.py --scenario <id> --side a --policy stubborn --peer-url http://127
 python world_server.py --port 9500
 python agent.py --scenario <id> --side a --policy stubborn  --port 9001 --peer-url http://127.0.0.1:9002 --world-url http://127.0.0.1:9500/mcp
 python agent.py --scenario <id> --side b --policy always_yield --port 9002 --peer-url http://127.0.0.1:9001 --world-url http://127.0.0.1:9500/mcp
+
+# D40: add --serve to both agents (they idle at their target instead of
+# exiting - the Cloud Run Service shape). Start a fresh episode any time with:
+python trigger_episode.py --world-url http://127.0.0.1:9500/mcp
+# deployed (locked-down world): add --auth to trigger_episode.py and both agents.
 
 # D19: after the episode above finishes, render it (world_server.py must
 # still be running - it holds the log)

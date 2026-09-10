@@ -15,7 +15,7 @@ from a2a.types.a2a_pb2 import Role, StreamResponse
 
 from scenarios import SCENARIOS  # noqa: E402
 from wire import message_to_dict  # noqa: E402
-from agent import build_robots, extract_reply, is_my_turn_to_initiate  # noqa: E402
+from agent import build_robots, build_world_client, extract_reply, is_my_turn_to_initiate  # noqa: E402
 
 
 def test_build_robots_side_a_gets_the_real_secret_and_b_is_a_placeholder():
@@ -79,3 +79,13 @@ def test_extract_reply_returns_nothing_for_an_unrelated_event():
 def test_is_my_turn_to_initiate_robot_a_wins_ties():
     assert is_my_turn_to_initiate("Robot A", "Robot B") is True
     assert is_my_turn_to_initiate("Robot B", "Robot A") is False
+
+
+def test_build_world_client_plain_without_auth():
+    """Phase 10b-3b: no --auth -> a bare Client(url), no token fetch, no
+    network at construction. The --auth path (OIDC token on the MCP
+    transport) needs GCP creds and is verified live, not here."""
+    from mcp.client import Client
+
+    client = build_world_client("http://127.0.0.1:9500/mcp", auth=False)
+    assert isinstance(client, Client)

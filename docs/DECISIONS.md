@@ -1583,3 +1583,19 @@ Three inputs, three redirects:
 **Verified live:** a world-integrated `--firestore` Gemini episode (`dying_battery_vs_fragile_cargo`) → `record_negotiation` landed the 6-message transcript in `world/current.negotiation` → `visualize_network.py --firestore --firestore-project corridor-agents` produced correct `episode_data` (`priority: Robot A`, `should_go_first: Robot A`, `correct: true`, decision at step 5, 19 collapsed rows from 64). The HTML renders identically to the MCP path. 125 tests.
 
 **Would change our mind:** if a control UI ever needs several concurrent episodes, `world/current` (one fixed doc, D38) stops being enough and the negotiation moves with the rest of the episode state into `episodes/{id}` — the `record_negotiation`/`get_negotiation` seam doesn't change, only what document it writes.
+
+## D40 — Phase 10b-3b (code): --serve idle mode, MCP-over-OIDC, trigger_episode.py
+
+**Decided:** the code that lets the world-integrated path (`agent.py --world-url`) run as Cloud Run **Services** rather than a one-shot Job.
+
+- **`build_world_client(world_url, auth)`** - the MCP client for the world channel. Plain `Client(url)` without `--auth`; with it, mint an OIDC ID token (audience = the world's URL) and wrap the streamable-http transport in an `httpx2.AsyncClient` carrying `Authorization: Bearer`. mcp's high-level `Client` takes a URL string but exposes no header hook - `streamable_http_client(url, http_client=...)` is an `@asynccontextmanager` yielding transport streams, and `Client` accepts that object directly as a transport. **`--auth` now covers the world channel too**, not just A2A - one flag, "authenticate every outbound cloud call," because a deployed `world_server.py` Service is locked down with `--no-allow-unauthenticated` exactly like robot-b.
+
+- **`run_robot(..., serve=False)`** - the movement loop moved into a nested `one_episode(world)`; the outer loop is `while True: await one_episode(world); if not serve: return; await wait_for_reset(world)`. `wait_for_reset` idle-polls `get_observation` until `reset_world()` puts the robot back before its target, then clears the per-episode state (`priority_holder`, `dial_holder` - cancelling any dangling dial - `incoming_active`, `comms_established_at`, `pending_trace`, `me.situation`). Each episode gets its own `world.episode` span. Without `--serve` (a local run) the loop still `return`s on `reached_target`, byte-identical to before.
+
+- **`trigger_episode.py`** - a ~15-line script: `build_world_client(world_url, auth)` → `reset_world()` → exit. The "start an episode" button, runnable locally or as a one-shot Cloud Run Job.
+
+**Why an explicit `--serve` flag, not auto-detecting Cloud Run:** the same reason as every other flag here (`--auth`, `--vertex`, `--trace`) - the deployed shape is a deliberate choice at the call site, and a local `--world-url` run should still end when the robot arrives, not hang.
+
+**Verified live, 3-terminal, in-memory world:** two `agent.py --serve` robots ran **three full episodes without restarting** - `trigger_episode.py` between each (`reset_world` → "world reset - new episode" → negotiate → move → reach target → idle). 126 tests.
+
+**Not yet:** the deploy itself (10b-3b-ii, all gcloud) - a `world@` SA + `roles/datastore.user`/`roles/cloudtrace.agent`, `roles/run.invoker` for the robot SAs on the world Service, deploy `world_server.py` as a Service, convert `robot-a` Job→Service, redeploy both with `--world-url --serve`, then verify the 3-service trace tree + the D39 visualizer replaying a fully-deployed episode.

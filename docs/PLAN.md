@@ -372,15 +372,20 @@ Split into sub-phases because 10b turned out to be three separate pieces:
   replay works for a Cloud Run episode with nothing local to query. Verified
   against a local `--firestore` Gemini episode.
 
-- **10b-3b — connect the deployed robots to a deployed world.**
-  `world_server.py` as a Cloud Run **Service** (own SA, `roles/datastore.user`).
-  Both robots redeploy with `--world-url` → they run `run_robot` (server +
-  mover), so **`robot-a` converts Job→Service** (D33's "would change our
-  mind"). Real work first: a `run_robot` idle mode (a Service can't exit on
-  `reached_target` — it must wait for a `reset_world()`), and MCP-over-OIDC
-  (`--auth` covers A2A only today). Ends with three long-lived Cloud Run
-  Services — world, robot-a, robot-b — plus Firestore, and the D39 visualizer
-  replaying a fully deployed episode.
+- **10b-3b (code). DONE (D40).** `agent.py --serve` keeps the process alive
+  after `reached_target` — `run_robot`'s loop idles on `wait_for_reset` until
+  `reset_world()` starts a fresh episode. `--auth` now also carries an OIDC
+  token on the MCP world channel (`build_world_client`). New
+  `trigger_episode.py` starts an episode. Verified 3-terminal: two `--serve`
+  robots, 3 episodes, no restart.
+
+- **10b-3b-ii — deploy.** All gcloud: `world@` SA + `roles/datastore.user` /
+  `roles/cloudtrace.agent`; `roles/run.invoker` for the robot SAs on the
+  world Service; `world_server.py` as a Cloud Run Service (`--firestore
+  --trace`); **`robot-a` converts Job→Service** (D33's "would change our
+  mind"); redeploy both robots with `--world-url --serve`. Ends with three
+  long-lived Cloud Run Services — world, robot-a, robot-b — plus Firestore,
+  and the D39 visualizer replaying a fully deployed episode.
 
 ### Phase 11+ — The actual project, indefinitely
 
