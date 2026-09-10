@@ -346,14 +346,16 @@ Split into sub-phases because 10b turned out to be three separate pieces:
   handling nests into the calling robot's trace. `tracing.span()` is now
   dual-protocol (`with` and `async with`). No new infra.
 
-- **10b-2 — Firestore-backed world (Option C).** Replace `world_server.py`'s
-  in-memory `STATE` singleton with a Firestore document, so the world can
-  survive Cloud Run's multi-instance / recycle model. `propose_action`
-  becomes a `@firestore.transactional` read-modify-write (two instances can
-  call it at once). Episode lifecycle becomes explicit (one doc per episode;
-  resetting it is "new episode" — the same trigger a future control UI would
-  use). Local dev runs against the Firestore emulator, no GCP needed. New
-  dep: `google-cloud-firestore`.
+- **10b-2 — Firestore-backed world (Option C). CODE DONE (D38),
+  Firestore path not yet live-verified.** `world_server.py`'s in-memory
+  `STATE` is now one of two backends behind `world_store.py`;
+  `InMemoryWorldStore` stays the default (tests + single-process runs
+  unchanged), `--firestore` swaps in `FirestoreWorldStore` — positions in
+  one doc `world/current`, `propose()` a `@firestore.transactional`
+  read-modify-write. New `reset_world()` tool + `--reset` flag for episode
+  lifecycle. In-memory path verified (121 tests + live 3-terminal episode);
+  the real Firestore read-modify-write is pending (emulator needs a JRE
+  this machine lacks) — do it against real Firestore at the top of 10b-3.
 
 - **10b-3 — deploy + Cloud Trace verification.** `world_server.py` as a
   Cloud Run **Service** (own service account, `roles/datastore.user`,

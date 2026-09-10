@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""Phase 10b-2 (D38): where world_server.py keeps the two robots' positions.
+
+Two backends behind one interface. `world.py`'s WorldState / reactive_filter
+/ apply are reused untouched - only the *storage* changes:
+
+- InMemoryWorldStore: one WorldState in this process's memory. Exactly
+  today's behavior (D17). The default; every single-process local run and
+  the whole test suite stay on this, no Firestore, no import of the
+  google-cloud-firestore SDK.
+
+- FirestoreWorldStore: the positions live in one Firestore document,
+  `world/current`. A Cloud Run Service can run several instances and
+  recycle them; an in-memory singleton doesn't survive that, and two
+  robots on two instances would each see a stale world - defeating the
+  reactive collision check (see world.py.reactive_filter), which is the
+  whole point of the layer split (PLAN.md §4). propose() is a Firestore
+  transaction: read the doc, run reactive_filter/apply, write back;
+  Firestore retries on contention, so a second robot's proposal
+  automatically re-evaluates against the first's committed move.
+
+The only piece not exercised by the unit tests is FirestoreWorldStore's
+~10 lines of transaction wiring (needs the emulator or real Firestore);
+everything that decides an outcome - _resolve, the doc<->positions
+round-trip - is pure and tested directly, and InMemoryWorldStore is
+asserted to behave identically to the pre-D38 code.
+"""
+
+from __future__ import annotations
+
+import sys
+import time
+
+sys.path.insert(0, "src")
+
+from negotiation import Robot  # noqa: E402
+from world import (  # noqa: E402
+    A_BOUNDARY,
+    A_DIRECTION,
+    A_START,
+    A_TARGET,
+    B_BOUNDARY,
+    B_DIRECTION,
+    B_START,
+    B_TARGET,
+    RobotState,
+    WorldState,
+    apply,
+    reactive_filter,
+)
+
+COLLECTION = "world"
+DOCUMENT = "current"
+
+
+def state_from_positions(a_position: int, b_position: int) -> WorldState:
+    """Rebuild a WorldState from just the two positions - identical to
+    world_server.py's old build_state(), but the positions come from the
+    store instead of the A_START/B_START constants. The wrapped Robot is a
+    throwaway placeholder: reactive_filter/apply only ever read
+    .position / .direction / .in_zone, never .robot."""
+    a = RobotState(Robot("Robot A", "", 0), a_position, A_DIRECTION, A_BOUNDARY, A_TARGET)
+    b = RobotState(Robot("Robot B", "", 0), b_position, B_DIRECTION, B_BOUNDARY, B_TARGET)
+    return WorldState(a, b)
+
+
+def _resolve(state: WorldState, side: str, action: str) -> dict:
+    """Run one robot's proposed action through the reactive safety filter
+    and apply it to `state` (mutates in place). The other robot is fixed
+    as "wait" - only one robot transitions per call, so there's nothing
+    for it to race against (world_server.py's D17 model, unchanged).
+    Returns the log entry, which carries everything the caller needs:
+    the resolved action and both post-move positions."""
+    if side == "a":
+        resolved, _ = reactive_filter(state, action, "wait")
+        apply(state, resolved, "wait")
+    else:
+        _, resolved = reactive_filter(state, "wait", action)
+        apply(state, "wait", resolved)
+    return {
+        "side": side,
+        "action": action,
+        "resolved": resolved,
+        "a_position": state.a.position,
+        "b_position": state.b.position,
+        "timestamp": time.time(),
+    }
+
+
+class InMemoryWorldStore:
+    """Today's behavior: one WorldState in this process's memory."""
+
+    def __init__(self):
+        self._state = state_from_positions(A_START, B_START)
+
+    def get_state(self) -> WorldState:
+        return self._state
+
+    def propose(self, side: str, action: str) -> dict:
+        entry = _resolve(self._state, side, action)
+        self._state.log.append(entry)
+        return entry
+
+    def get_log(self) -> list[dict]:
+        return list(self._state.log)
+
+    def reset(self) -> None:
+        self._state = state_from_positions(A_START, B_START)
+
+
+class FirestoreWorldStore:
+    """Positions in `world/current`; propose() is a transaction.
+
+    project=None lets the SDK resolve it (ADC / GOOGLE_CLOUD_PROJECT on
+    Cloud Run, any string plus FIRESTORE_EMULATOR_HOST locally). The doc
+    is lazily created at start positions on first access."""
+
+    def __init__(self, project: str | None = None, collection: str = COLLECTION, document: str = DOCUMENT):
+        from google.cloud import firestore
+
+        self._firestore = firestore
+        self._db = firestore.Client(project=project)
+        self._doc = self._db.collection(collection).document(document)
+
+    def _ensure(self) -> None:
+        if not self._doc.get().exists:
+            self.reset()
+
+    def get_state(self) -> WorldState:
+        self._ensure()
+        d = self._doc.get().to_dict()
+        return state_from_positions(d["a_position"], d["b_position"])
+
+    def propose(self, side: str, action: str) -> dict:
+        self._ensure()
+        firestore = self._firestore
+        doc = self._doc
+
+        @firestore.transactional
+        def run(txn):
+            snap = doc.get(transaction=txn).to_dict()
+            state = state_from_positions(snap["a_position"], snap["b_position"])
+            entry = _resolve(state, side, action)
+            txn.update(
+                doc,
+                {
+                    "a_position": state.a.position,
+                    "b_position": state.b.position,
+                    "log": firestore.ArrayUnion([entry]),
+                },
+            )
+            return entry
+
+        return run(self._db.transaction())
+
+    def get_log(self) -> list[dict]:
+        self._ensure()
+        return self._doc.get().to_dict().get("log", [])
+
+    def reset(self) -> None:
+        self._doc.set(
+            {
+                "a_position": A_START,
+                "b_position": B_START,
+                "log": [],
+                "reset_at": self._firestore.SERVER_TIMESTAMP,
+            }
+        )

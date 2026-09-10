@@ -10,6 +10,12 @@ pytest>=8.0
 # holds across model providers. Only imported when --policy gemini is used.
 google-genai>=1.0
 
+# Phase 10b-2/D38: FirestoreWorldStore - the world's positions in a Firestore
+# doc instead of a process-memory singleton, so world_server.py survives Cloud
+# Run's multi-instance model. Only imported when world_server.py --firestore is
+# passed; the default in-memory store needs none of this.
+google-cloud-firestore>=2.30
+
 # Phase 4: real HTTP between separate processes (docs/PLAN.md §5, D2).
 fastapi>=0.115
 uvicorn>=0.30

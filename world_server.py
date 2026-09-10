@@ -32,56 +32,33 @@ robot's own guess is provisional until the world confirms it).
 
 import argparse
 import sys
-import time
 
 sys.path.insert(0, "src")
 
 import tracing  # noqa: E402 - Phase 10b-1, no-op unless --trace calls tracing.setup()
 
-from negotiation import Robot  # noqa: E402
 from observation import distance_to_entrance  # noqa: E402
 from world import (  # noqa: E402
     A_BOUNDARY,
-    A_DIRECTION,
-    A_START,
     A_TARGET,
     B_BOUNDARY,
-    B_DIRECTION,
-    B_START,
     B_TARGET,
     CORRIDOR_ZONE,
     MAX_POSITION,
     MIN_POSITION,
     SENSOR_RANGE,
-    RobotState,
-    WorldState,
-    apply,
-    reactive_filter,
 )
 
 from mcp.server.mcpserver import MCPServer  # noqa: E402
+from world_store import InMemoryWorldStore  # noqa: E402
 
-
-def build_state() -> WorldState:
-    """A placeholder Robot per side, same pattern agent.py's `other` uses -
-    RobotState.robot is a required field, but reactive_filter/apply never
-    read it, only .position/.direction/.in_zone."""
-    a = RobotState(Robot("Robot A", "", 0), A_START, A_DIRECTION, A_BOUNDARY, A_TARGET)
-    b = RobotState(Robot("Robot B", "", 0), B_START, B_DIRECTION, B_BOUNDARY, B_TARGET)
-    return WorldState(a, b)
-
-
-STATE = build_state()
+# The world's storage (Phase 10b-2/D38). Defaults to the in-memory
+# singleton - exactly the pre-D38 behavior; main() swaps in a
+# FirestoreWorldStore when --firestore is passed. Module-level so the
+# @mcp.tool() functions can reach it.
+_store = InMemoryWorldStore()
 
 mcp = MCPServer("corridor-world")
-
-
-def _robot_state(side: str) -> RobotState:
-    return STATE.a if side == "a" else STATE.b
-
-
-def _other_state(side: str) -> RobotState:
-    return STATE.b if side == "a" else STATE.a
 
 
 @mcp.tool()
@@ -111,8 +88,8 @@ def get_observation(side: str) -> dict:
     judge whether the other is anywhere near ALSO being about to
     negotiate, versus sensed-but-nowhere-close."""
     with tracing.span("world.get_observation", side=side) as s:
-        me = _robot_state(side)
-        other = _other_state(side)
+        state = _store.get_state()
+        me, other = (state.a, state.b) if side == "a" else (state.b, state.a)
         gap = abs(me.position - other.position)
         sensed = gap <= SENSOR_RANGE
         if s is not None:
@@ -148,22 +125,14 @@ def propose_action(side: str, action: str) -> dict:
         raise ValueError('action must be "move" or "wait"')
 
     with tracing.span("world.propose_action", side=side, action=action) as s:
-        if side == "a":
-            resolved, _ = reactive_filter(STATE, action, "wait")
-            apply(STATE, resolved, "wait")
-            position = STATE.a.position
-        else:
-            _, resolved = reactive_filter(STATE, "wait", action)
-            apply(STATE, "wait", resolved)
-            position = STATE.b.position
-
-        STATE.log.append((side, action, resolved, STATE.a.position, STATE.b.position, time.time()))
+        entry = _store.propose(side, action)
+        position = entry["a_position"] if side == "a" else entry["b_position"]
         if s is not None:
-            s.set_attribute("world.resolved", resolved)
-            s.set_attribute("world.accepted", resolved == action)
-            s.set_attribute("world.a_position", STATE.a.position)
-            s.set_attribute("world.b_position", STATE.b.position)
-        return {"accepted": resolved == action, "actual_position": position}
+            s.set_attribute("world.resolved", entry["resolved"])
+            s.set_attribute("world.accepted", entry["resolved"] == action)
+            s.set_attribute("world.a_position", entry["a_position"])
+            s.set_attribute("world.b_position", entry["b_position"])
+        return {"accepted": entry["resolved"] == action, "actual_position": position}
 
 
 @mcp.tool()
@@ -178,18 +147,20 @@ def get_log() -> dict:
     commit), so "how much real time actually passed between these two
     events" is only recoverable from real timestamps, not from entry
     order alone."""
-    entries = [
-        {
-            "side": side,
-            "action": action,
-            "resolved": resolved,
-            "a_position": a_pos,
-            "b_position": b_pos,
-            "timestamp": timestamp,
-        }
-        for side, action, resolved, a_pos, b_pos, timestamp in STATE.log
-    ]
-    return {"entries": entries}
+    with tracing.span("world.get_log"):
+        return {"entries": _store.get_log()}
+
+
+@mcp.tool()
+def reset_world() -> dict:
+    """Both robots back to their start positions, log emptied - a fresh
+    episode. In the in-memory backend this is what a server restart used
+    to do; with --firestore the doc persists across restarts, so this is
+    the explicit "new episode" trigger (also what a future control UI
+    would call). See D38."""
+    with tracing.span("world.reset"):
+        _store.reset()
+        return {"reset": True}
 
 
 def main():
@@ -205,9 +176,32 @@ def main():
         action="store_true",
         help="Phase 10b-1/D35: emit OpenTelemetry spans - world.get_observation / world.propose_action per tool call, under the incoming request's trace, so a robot's mcp.* client span and this server's handling nest into one tree. Off by default. Exporter from OTEL_TRACES_EXPORTER (console / gcp).",
     )
+    parser.add_argument(
+        "--firestore",
+        action="store_true",
+        help="Phase 10b-2/D38: keep the world's positions in a Firestore document (world/current) instead of an in-memory singleton, so it survives Cloud Run's multi-instance / recycle model. Off by default - a single-process local run keeps the in-memory store, no google-cloud-firestore import. Honors FIRESTORE_EMULATOR_HOST for local dev.",
+    )
+    parser.add_argument(
+        "--firestore-project",
+        default=None,
+        help="GCP project for --firestore (default: let the SDK resolve it - ADC / GOOGLE_CLOUD_PROJECT on Cloud Run, any string with FIRESTORE_EMULATOR_HOST set locally)",
+    )
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="reset the world to start positions on startup - a local convenience matching 'restart the server = fresh episode'. Do NOT pass this on a multi-instance deploy: every instance that starts would wipe the shared world. Use the reset_world() tool there instead.",
+    )
     args = parser.parse_args()
 
-    print(f"world server listening on http://{args.host}:{args.port}")
+    global _store
+    if args.firestore:
+        from world_store import FirestoreWorldStore
+
+        _store = FirestoreWorldStore(project=args.firestore_project)
+    if args.reset:
+        _store.reset()
+
+    print(f"world server listening on http://{args.host}:{args.port}" + (" (firestore)" if args.firestore else ""))
     if args.trace:
         # Build the Starlette app ourselves so it can be wrapped for
         # traceparent extraction - mcp.run() does exactly this internally

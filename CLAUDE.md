@@ -252,12 +252,25 @@ live across 3 processes - the world's tool-handling spans nest into the
 calling robot's trace. `mcp` (like a2a-sdk) ships its own OTel spans, free
 once a `TracerProvider` exists. Still local-only.
 
-**10b-2 / 10b-3 remain:** Option C (Firestore-backed `WorldState`, replacing
-`world_server.py`'s in-memory singleton so the world survives Cloud Run's
-multi-instance model), then deploy all three as Cloud Run Services
-(`robot-a` converts Job→Service) with `--policy gemini --trace` and
-`OTEL_TRACES_EXPORTER=gcp`, and verify the trace tree in Cloud Trace. See
-`PLAN.md` §5.
+**Phase 10b-2 code done (D38): Firestore-backed world, behind a store seam.**
+`world_server.py`'s in-memory `STATE` singleton is now one of two backends in
+`world_store.py`. `InMemoryWorldStore` stays the **default** - `python
+world_server.py`, the test suite, single-process runs are all unchanged, no
+`google-cloud-firestore` import. `world_server.py --firestore` swaps in
+`FirestoreWorldStore`: positions in one doc `world/current`, `propose()` a
+`@firestore.transactional` read-modify-write (so two robots on two Cloud Run
+instances can't both "enter" a stale corridor). New `reset_world()` MCP tool
++ `--reset` flag for episode lifecycle (the doc persists across restarts
+now). `agent.py` unchanged - robots are MCP clients, backend-agnostic.
+**In-memory path verified** (121 tests + a live 3-terminal `--world-url`
+episode); **the real Firestore read-modify-write is not yet run** - the
+local emulator needs a JRE this machine lacks, so verify against real
+Firestore at the top of 10b-3.
+
+**10b-3 remains:** create the Firestore DB + verify `--firestore` live, then
+deploy all three as Cloud Run Services (`robot-a` converts Job→Service) with
+`--policy gemini --trace` and `OTEL_TRACES_EXPORTER=gcp`, and verify the
+trace tree in Cloud Trace. See `PLAN.md` §5.
 
 **Phase 9 (three or more robots) is deliberately skipped for now** - it's
 a `world.py` rewrite plus a real N-way-negotiation design fork, and the
@@ -274,7 +287,7 @@ out Phase 8 and 10b together. See `PLAN.md` §5.
 
 ```bash
 source .venv/bin/activate        # Python 3.13; required in each new shell
-python -m pytest tests/ -q       # 115 tests, no API calls, ~0.03s
+python -m pytest tests/ -q       # 121 tests, no API calls, ~0.03s
 python run.py                    # one negotiation, deterministic policies
 python run.py --a llm --b llm    # needs: cp .env.example .env && source .env
 python eval.py                   # measurement sweep, deterministic cases only

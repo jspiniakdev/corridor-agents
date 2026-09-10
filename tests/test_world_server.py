@@ -2,6 +2,10 @@
 after @mcp.tool() - no real MCP server or network needed to test the logic,
 same "test the decision, not the transport" split used throughout this
 project. Real client/server wiring is manually verified instead (see D17).
+
+Since D38 the tools go through world_server._store (an InMemoryWorldStore
+by default); tests reach into it via _state() rather than a module STATE.
+FirestoreWorldStore's transaction wiring is verified live, not here.
 """
 
 import sys
@@ -15,7 +19,11 @@ import world_server as ws  # noqa: E402
 
 
 def reset_state():
-    ws.STATE = ws.build_state()
+    ws._store.reset()
+
+
+def _state():
+    return ws._store.get_state()
 
 
 def test_get_map_matches_world_constants():
@@ -37,8 +45,8 @@ def test_get_observation_reflects_current_position():
 
 def test_get_observation_senses_other_within_range():
     reset_state()
-    ws.STATE.a.position = 3
-    ws.STATE.b.position = 5
+    _state().a.position = 3
+    _state().b.position = 5
     obs = ws.get_observation("a")
     assert obs["sensed_other"] is True
     assert obs["gap_if_sensed"] == 2
@@ -46,8 +54,8 @@ def test_get_observation_senses_other_within_range():
 
 def test_get_observation_reports_other_distance_to_its_own_boundary():
     reset_state()
-    ws.STATE.a.position = 1
-    ws.STATE.b.position = 5  # sensed (gap=4 <= 6), 1 step from its own boundary (6)
+    _state().a.position = 1
+    _state().b.position = 5  # sensed (gap=4 <= 6), 1 step from its own boundary (6)
     obs = ws.get_observation("a")
     assert obs["sensed_other"] is True
     assert obs["other_distance_to_boundary"] == 1
@@ -66,7 +74,7 @@ def test_propose_action_moves_when_safe():
     reset_state()
     result = ws.propose_action("a", "move")
     assert result == {"accepted": True, "actual_position": 2}
-    assert ws.STATE.a.position == 2
+    assert _state().a.position == 2
 
 
 def test_propose_action_wait_never_changes_position():
@@ -77,20 +85,20 @@ def test_propose_action_wait_never_changes_position():
 
 def test_propose_action_blocks_entry_while_the_other_robot_is_in_the_zone():
     reset_state()
-    ws.STATE.a.position = 4  # already inside the corridor zone
-    ws.STATE.b.position = 6  # at its boundary, about to try entering
+    _state().a.position = 4  # already inside the corridor zone
+    _state().b.position = 6  # at its boundary, about to try entering
 
     result = ws.propose_action("b", "move")
 
     assert result["accepted"] is False
     assert result["actual_position"] == 6  # held at the boundary
-    assert ws.STATE.b.position == 6
+    assert _state().b.position == 6
 
 
 def test_propose_action_only_moves_the_requesting_side():
     reset_state()
     ws.propose_action("a", "move")
-    assert ws.STATE.b.position == B_START  # untouched by A's call
+    assert _state().b.position == B_START  # untouched by A's call
 
 
 def test_get_log_starts_empty():
@@ -121,3 +129,16 @@ def test_get_log_timestamps_are_monotonically_non_decreasing():
     timestamps = [entry["timestamp"] for entry in ws.get_log()["entries"]]
 
     assert timestamps == sorted(timestamps)
+
+
+def test_reset_world_returns_both_robots_to_start_with_an_empty_log():
+    reset_state()
+    ws.propose_action("a", "move")
+    ws.propose_action("a", "move")
+    assert _state().a.position == 3
+
+    assert ws.reset_world() == {"reset": True}
+
+    assert _state().a.position == 1
+    assert _state().b.position == B_START
+    assert ws.get_log() == {"entries": []}
