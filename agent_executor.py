@@ -62,10 +62,10 @@ class NegotiationExecutor(AgentExecutor):
     `on_resolved`, if given, is called once with (outcome, history,
     message_times) - the negotiated outcome (a robot name, or None for a
     deadlock), the full message transcript, and a real time.time() per
-    message (D29, parallel by index - self.message_times, extended
-    lazily each call since history is rebuilt fresh from the a2a task
-    every time, not accumulated locally) - the moment this side of the
-    negotiation learns it. This is the one way a world-movement loop
+    message (D29, parallel by index - self.message_times, reset per
+    negotiation task and extended lazily each call since history is
+    rebuilt fresh from the a2a task every time, not accumulated locally) -
+    the moment this side of the negotiation learns it. This is the one way a world-movement loop
     finds out priority was decided by an *incoming* negotiation (since
     that happens entirely inside execute(), not in the loop's own
     coroutine), and the only way it can write out a full trace file
@@ -96,6 +96,12 @@ class NegotiationExecutor(AgentExecutor):
             span.set_attribute("negotiation.new_task", is_new_task)
         task, history = history_from_context(context)
         if is_new_task:
+            # D44 fix: a --serve robot (D40) reuses this one executor across
+            # every episode. message_times must start empty for each new
+            # negotiation, or the previous episode's timestamps leak into
+            # this one's trace (they're index-parallel to a history that's
+            # rebuilt fresh every task, so a stale list is never refilled).
+            self.message_times = []
             await event_queue.enqueue_event(task)
             if self.on_task_started:
                 self.on_task_started(self.other.name)

@@ -17,7 +17,7 @@ from a2a.helpers import new_task_from_user_message  # noqa: E402
 from a2a.server.events.event_queue_v2 import EventQueueSource  # noqa: E402
 from a2a.types.a2a_pb2 import Role, TaskState, TaskStatus  # noqa: E402
 
-from negotiation import Intent, Message, Robot, Stubborn  # noqa: E402
+from negotiation import AlwaysYield, Intent, Message, Robot, Stubborn  # noqa: E402
 from wire import message_to_dict  # noqa: E402
 from agent_executor import NegotiationExecutor, history_from_context, should_respond  # noqa: E402
 
@@ -118,3 +118,30 @@ def test_on_task_started_does_not_fire_again_for_a_continuing_task():
     asyncio.run(_execute(executor, context))
 
     assert started_calls == []
+
+
+def test_message_times_reset_per_task_so_serve_episodes_dont_leak_timestamps():
+    """D44 fix: one executor, reused across --serve episodes (D40). Each
+    new negotiation task must start message_times empty, or the previous
+    episode's timestamps stay in the list (index-parallel to a history
+    rebuilt fresh each task, so a stale list is never refilled) and leak
+    into this episode's trace."""
+    me = Robot("Robot B", "", 0, AlwaysYield())
+    other = Robot("Robot A", "", 0)
+    resolved = []
+    executor = NegotiationExecutor(
+        me, other, max_turns=6, on_resolved=lambda outcome, history, times: resolved.append((history, times))
+    )
+
+    def run_one_episode():
+        opening = Message("Robot A", Intent.PROPOSE, "Robot A", "you go first")
+        asyncio.run(_execute(executor, FakeContext(current_task=None, message=to_a2a(opening, Role.ROLE_USER))))
+
+    run_one_episode()
+    run_one_episode()
+
+    for history, times in resolved:
+        assert len(times) == len(history)  # not accumulated across episodes
+    # both episodes are the same 2-message shape; without the reset the
+    # second would carry 3+ timestamps for a 2-message history
+    assert [len(t) for _, t in resolved] == [len(resolved[0][1])] * 2
