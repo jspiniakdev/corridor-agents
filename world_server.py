@@ -38,19 +38,10 @@ sys.path.insert(0, "src")
 import tracing  # noqa: E402 - Phase 10b-1, no-op unless --trace calls tracing.setup()
 
 from observation import distance_to_entrance  # noqa: E402
-from world import (  # noqa: E402
-    A_BOUNDARY,
-    A_TARGET,
-    B_BOUNDARY,
-    B_TARGET,
-    CORRIDOR_ZONE,
-    MAX_POSITION,
-    MIN_POSITION,
-    SENSOR_RANGE,
-)
+from world import CORRIDOR_ZONE, SENSOR_RANGE  # noqa: E402
 
 from mcp.server.mcpserver import MCPServer  # noqa: E402
-from world_store import InMemoryWorldStore  # noqa: E402
+from world_store import InMemoryWorldStore, grid_facts  # noqa: E402
 
 # The world's storage (Phase 10b-2/D38). Defaults to the in-memory
 # singleton - exactly the pre-D38 behavior; main() swaps in a
@@ -64,15 +55,7 @@ mcp = MCPServer("corridor-world")
 @mcp.tool()
 def get_map() -> dict:
     """Static grid facts. Called once, at startup."""
-    return {
-        "min_position": MIN_POSITION,
-        "max_position": MAX_POSITION,
-        "corridor_zone": sorted(CORRIDOR_ZONE),
-        "a_boundary": A_BOUNDARY,
-        "b_boundary": B_BOUNDARY,
-        "a_target": A_TARGET,
-        "b_target": B_TARGET,
-    }
+    return grid_facts()
 
 
 @mcp.tool()
@@ -152,12 +135,38 @@ def get_log() -> dict:
 
 
 @mcp.tool()
+def record_negotiation(messages: list, comms_established_at: float, resolved_at: float) -> dict:
+    """The robot that held the full negotiation transcript hands it to the
+    world once the negotiation concludes (D39), so visualize_network.py
+    can fetch it alongside the movement log - the same job the local
+    negotiation_trace.json file does for a pure-local run, but reachable
+    when the robots ran on Cloud Run. Stored on the current episode;
+    reset_world() clears it. Same shape agent.py's write_negotiation_trace
+    writes: messages carry a per-entry `timestamp` (D29)."""
+    with tracing.span("world.record_negotiation"):
+        _store.set_negotiation(
+            {"messages": messages, "comms_established_at": comms_established_at, "resolved_at": resolved_at}
+        )
+        return {"recorded": len(messages)}
+
+
+@mcp.tool()
+def get_negotiation() -> dict:
+    """The transcript recorded by record_negotiation, or {"negotiation":
+    None} if this episode never negotiated (a robot arrived at its
+    boundary alone). For visualize_network.py's MCP path; the Firestore
+    path reads world/current.negotiation directly."""
+    with tracing.span("world.get_negotiation"):
+        return {"negotiation": _store.get_negotiation()}
+
+
+@mcp.tool()
 def reset_world() -> dict:
-    """Both robots back to their start positions, log emptied - a fresh
-    episode. In the in-memory backend this is what a server restart used
-    to do; with --firestore the doc persists across restarts, so this is
-    the explicit "new episode" trigger (also what a future control UI
-    would call). See D38."""
+    """Both robots back to their start positions, log emptied, last
+    negotiation transcript cleared - a fresh episode. In the in-memory
+    backend this is what a server restart used to do; with --firestore
+    the doc persists across restarts, so this is the explicit "new
+    episode" trigger (also what a future control UI would call). See D38."""
     with tracing.span("world.reset"):
         _store.reset()
         return {"reset": True}

@@ -346,26 +346,41 @@ Split into sub-phases because 10b turned out to be three separate pieces:
   handling nests into the calling robot's trace. `tracing.span()` is now
   dual-protocol (`with` and `async with`). No new infra.
 
-- **10b-2 — Firestore-backed world (Option C). CODE DONE (D38),
-  Firestore path not yet live-verified.** `world_server.py`'s in-memory
-  `STATE` is now one of two backends behind `world_store.py`;
-  `InMemoryWorldStore` stays the default (tests + single-process runs
-  unchanged), `--firestore` swaps in `FirestoreWorldStore` — positions in
-  one doc `world/current`, `propose()` a `@firestore.transactional`
-  read-modify-write. New `reset_world()` tool + `--reset` flag for episode
-  lifecycle. In-memory path verified (121 tests + live 3-terminal episode);
-  the real Firestore read-modify-write is pending (emulator needs a JRE
-  this machine lacks) — do it against real Firestore at the top of 10b-3.
+- **10b-2 — Firestore-backed world (Option C). DONE (D38).**
+  `world_server.py`'s in-memory `STATE` is now one of two backends behind
+  `world_store.py`; `InMemoryWorldStore` stays the default (tests +
+  single-process runs unchanged), `--firestore` swaps in
+  `FirestoreWorldStore` — positions in one doc `world/current`, `propose()`
+  a `@firestore.transactional` read-modify-write. New `reset_world()` tool
+  + `--reset` flag for episode lifecycle. Verified live against real
+  Firestore (`(default)` DB in `us-central1`): standalone store exercise +
+  a full 3-process `--firestore` episode, 18-entry log persisted in
+  `world/current`.
 
-- **10b-3 — deploy + Cloud Trace verification.** `world_server.py` as a
-  Cloud Run **Service** (own service account, `roles/datastore.user`,
-  `--no-allow-unauthenticated`). Both robots redeploy with `--world-url` →
-  they now run `run_robot` (server + mover), so **`robot-a` converts from a
-  Job to a Service** (the D33 "would change our mind" case). Robots run
-  `--policy gemini --trace` with `OTEL_TRACES_EXPORTER=gcp`; verify the
-  trace tree spans all three services in the Cloud Trace console. Ends with
-  three long-lived Cloud Run Services — world, robot-a, robot-b — plus
-  Firestore.
+- **10b-3a — the deployed negotiation, on Gemini, traced. DONE.** No code
+  changes: `robot-a` (Job) and `robot-b` (Service) redeployed with
+  `--policy gemini --vertex-project corridor-agents --trace` +
+  `OTEL_TRACES_EXPORTER=gcp` (both SAs +`roles/cloudtrace.agent`). A real
+  cloud-to-cloud Gemini negotiation; Cloud Trace shows one trace across both
+  services with `llm.respond` (`provider=gemini`) and the cross-process
+  `POST` → `POST /` link.
+
+- **D39 — `visualize_network.py --firestore`. DONE.** The network replay
+  reads the whole episode from `world/current` (grid from `world.py`
+  constants, movement log from D38, negotiation transcript from a new
+  `negotiation` field written by a `record_negotiation` MCP tool), so a
+  replay works for a Cloud Run episode with nothing local to query. Verified
+  against a local `--firestore` Gemini episode.
+
+- **10b-3b — connect the deployed robots to a deployed world.**
+  `world_server.py` as a Cloud Run **Service** (own SA, `roles/datastore.user`).
+  Both robots redeploy with `--world-url` → they run `run_robot` (server +
+  mover), so **`robot-a` converts Job→Service** (D33's "would change our
+  mind"). Real work first: a `run_robot` idle mode (a Service can't exit on
+  `reached_target` — it must wait for a `reset_world()`), and MCP-over-OIDC
+  (`--auth` covers A2A only today). Ends with three long-lived Cloud Run
+  Services — world, robot-a, robot-b — plus Firestore, and the D39 visualizer
+  replaying a fully deployed episode.
 
 ### Phase 11+ — The actual project, indefinitely
 

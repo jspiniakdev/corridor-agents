@@ -43,6 +43,9 @@ from world import (  # noqa: E402
     B_DIRECTION,
     B_START,
     B_TARGET,
+    CORRIDOR_ZONE,
+    MAX_POSITION,
+    MIN_POSITION,
     RobotState,
     WorldState,
     apply,
@@ -51,6 +54,21 @@ from world import (  # noqa: E402
 
 COLLECTION = "world"
 DOCUMENT = "current"
+
+
+def grid_facts() -> dict:
+    """The static grid constants, in the exact shape world_server.py's
+    get_map() returns. Shared (D39) so visualize_network.py's --firestore
+    path - which never calls get_map over MCP - builds the identical dict."""
+    return {
+        "min_position": MIN_POSITION,
+        "max_position": MAX_POSITION,
+        "corridor_zone": sorted(CORRIDOR_ZONE),
+        "a_boundary": A_BOUNDARY,
+        "b_boundary": B_BOUNDARY,
+        "a_target": A_TARGET,
+        "b_target": B_TARGET,
+    }
 
 
 def state_from_positions(a_position: int, b_position: int) -> WorldState:
@@ -92,6 +110,7 @@ class InMemoryWorldStore:
 
     def __init__(self):
         self._state = state_from_positions(A_START, B_START)
+        self._negotiation = None
 
     def get_state(self) -> WorldState:
         return self._state
@@ -104,8 +123,15 @@ class InMemoryWorldStore:
     def get_log(self) -> list[dict]:
         return list(self._state.log)
 
+    def set_negotiation(self, data: dict | None) -> None:
+        self._negotiation = data
+
+    def get_negotiation(self) -> dict | None:
+        return self._negotiation
+
     def reset(self) -> None:
         self._state = state_from_positions(A_START, B_START)
+        self._negotiation = None
 
 
 class FirestoreWorldStore:
@@ -157,12 +183,21 @@ class FirestoreWorldStore:
         self._ensure()
         return self._doc.get().to_dict().get("log", [])
 
+    def set_negotiation(self, data: dict | None) -> None:
+        self._ensure()
+        self._doc.update({"negotiation": data})
+
+    def get_negotiation(self) -> dict | None:
+        self._ensure()
+        return self._doc.get().to_dict().get("negotiation")
+
     def reset(self) -> None:
         self._doc.set(
             {
                 "a_position": A_START,
                 "b_position": B_START,
                 "log": [],
+                "negotiation": None,
                 "reset_at": self._firestore.SERVER_TIMESTAMP,
             }
         )

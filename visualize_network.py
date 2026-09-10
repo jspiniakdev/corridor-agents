@@ -57,6 +57,20 @@ async def mcp_call(client, name, **args):
     return json.loads(result.content[0].text)
 
 
+def _negotiation_from_dict(data):
+    """The stored transcript ({"messages": [wire dict, ...],
+    "comms_established_at", "resolved_at"}) -> the shape build_episode_data
+    wants, with messages rehydrated into Message objects. Same for the
+    local file and the Firestore field."""
+    if not data:
+        return None
+    return {
+        "messages": history_from_list(data["messages"]),
+        "comms_established_at": data["comms_established_at"],
+        "resolved_at": data["resolved_at"],
+    }
+
+
 def load_negotiation_trace():
     """None if the episode never negotiated - a robot arrived at its
     boundary alone, so no trace file was ever written. Otherwise
@@ -65,12 +79,7 @@ def load_negotiation_trace():
     if not os.path.exists(NEGOTIATION_TRACE_PATH):
         return None
     with open(NEGOTIATION_TRACE_PATH) as f:
-        data = json.load(f)
-    return {
-        "messages": history_from_list(data["messages"]),
-        "comms_established_at": data["comms_established_at"],
-        "resolved_at": data["resolved_at"],
-    }
+        return _negotiation_from_dict(json.load(f))
 
 
 def find_step_at_or_after(entries, target_timestamp):
@@ -301,26 +310,46 @@ def render_html(template_text, episode_data):
     return template_text.replace(PLACEHOLDER, json.dumps(episode_data, indent=2))
 
 
-async def main_async(args):
-    from mcp.client import Client
-
-    scenario = BY_ID[args.scenario]
-    async with Client(args.world_url) as world:
-        grid = await mcp_call(world, "get_map")
-        log_result = await mcp_call(world, "get_log")
-
-    entries = log_result["entries"]
-    messages = load_negotiation_trace()
-    episode_data = build_episode_data(scenario, args.a, args.b, grid, entries, messages)
-
+def _write_html(scenario, a_name, b_name, grid, entries, messages):
+    episode_data = build_episode_data(scenario, a_name, b_name, grid, entries, messages)
     with open(TEMPLATE_PATH) as f:
         template_text = f.read()
     html = render_html(template_text, episode_data)
-
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     with open(OUTPUT_PATH, "w") as f:
         f.write(html)
     print(f"wrote {OUTPUT_PATH} - open it directly in a browser")
+
+
+async def main_async(args):
+    """MCP path: fetch the grid and movement log from a live
+    world_server.py, and the transcript from the local trace file."""
+    from mcp.client import Client
+
+    async with Client(args.world_url) as world:
+        grid = await mcp_call(world, "get_map")
+        log_result = await mcp_call(world, "get_log")
+    _write_html(BY_ID[args.scenario], args.a, args.b, grid, log_result["entries"], load_negotiation_trace())
+
+
+def main_firestore(args):
+    """--firestore path (D39): grid from the world.py constants, movement
+    log and transcript straight from the `world/current` document - so a
+    replay works when the robots ran on Cloud Run and there is no local
+    world_server.py to query and no local trace file to read."""
+    from world_store import grid_facts
+
+    from google.cloud import firestore
+
+    doc = firestore.Client(project=args.firestore_project).collection("world").document("current").get().to_dict() or {}
+    _write_html(
+        BY_ID[args.scenario],
+        args.a,
+        args.b,
+        grid_facts(),
+        doc.get("log", []),
+        _negotiation_from_dict(doc.get("negotiation")),
+    )
 
 
 def main():
@@ -329,8 +358,17 @@ def main():
     parser.add_argument("--a", default="llm", help="Robot A's policy, for display only")
     parser.add_argument("--b", default="llm", help="Robot B's policy, for display only")
     parser.add_argument("--world-url", default="http://127.0.0.1:9500/mcp")
+    parser.add_argument(
+        "--firestore",
+        action="store_true",
+        help="D39: read the episode from the world/current Firestore doc instead of a live world_server.py + local trace file - for replaying a Cloud Run episode.",
+    )
+    parser.add_argument("--firestore-project", default=None, help="GCP project for --firestore")
     args = parser.parse_args()
-    asyncio.run(main_async(args))
+    if args.firestore:
+        main_firestore(args)
+    else:
+        asyncio.run(main_async(args))
     return 0
 
 

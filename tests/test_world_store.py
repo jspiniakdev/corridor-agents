@@ -10,7 +10,7 @@ sys.path.insert(0, "src")
 
 from world import A_START, B_START, RobotState, WorldState, apply, reactive_filter  # noqa: E402
 
-from world_store import InMemoryWorldStore, _resolve, state_from_positions  # noqa: E402
+from world_store import InMemoryWorldStore, _resolve, grid_facts, state_from_positions  # noqa: E402
 
 
 def test_state_from_positions_rebuilds_a_usable_worldstate():
@@ -63,6 +63,32 @@ def test_inmemory_store_matches_raw_world_py_over_a_sequence():
             _, r = reactive_filter(ref, "wait", action)
             apply(ref, "wait", r)
         assert (store.get_state().a.position, store.get_state().b.position) == (ref.a.position, ref.b.position)
+
+
+def test_inmemory_store_negotiation_set_get_and_reset_clears_it():
+    """D39: the world holds the last negotiation transcript so
+    visualize_network.py can fetch it."""
+    store = InMemoryWorldStore()
+    assert store.get_negotiation() is None
+    trace = {"messages": [{"speaker": "Robot A", "intent": "propose"}], "comms_established_at": 1.0, "resolved_at": 2.0}
+    store.set_negotiation(trace)
+    assert store.get_negotiation() == trace
+    store.reset()
+    assert store.get_negotiation() is None
+
+
+def test_grid_facts_has_the_keys_world_servers_get_map_promised():
+    facts = grid_facts()
+    assert set(facts) == {
+        "min_position",
+        "max_position",
+        "corridor_zone",
+        "a_boundary",
+        "b_boundary",
+        "a_target",
+        "b_target",
+    }
+    assert facts["corridor_zone"] == [3, 4, 5]
 
 
 def test_inmemory_store_log_and_reset():

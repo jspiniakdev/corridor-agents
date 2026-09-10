@@ -13,7 +13,7 @@ sys.path.insert(0, "src")
 
 from negotiation import Intent, Message  # noqa: E402
 from scenarios import BY_ID  # noqa: E402
-from visualize_network import build_episode_data, find_step_at_or_after  # noqa: E402
+from visualize_network import _negotiation_from_dict, build_episode_data, find_step_at_or_after  # noqa: E402
 
 GRID = {
     "min_position": 1,
@@ -43,6 +43,22 @@ def test_find_step_at_or_after_falls_back_to_the_last_entry_when_target_is_later
 
 def test_find_step_at_or_after_returns_none_for_an_empty_log():
     assert find_step_at_or_after([], 100.0) is None
+
+
+def test_negotiation_from_dict_rehydrates_messages_and_passes_timestamps_through():
+    """D39: the same transform for the local trace file and the Firestore
+    `negotiation` field. None in -> None out (episode never negotiated)."""
+    assert _negotiation_from_dict(None) is None
+
+    data = {
+        "messages": [{"speaker": "Robot A", "intent": "propose", "goes_first": "Robot A", "text": "me first"}],
+        "comms_established_at": 10.0,
+        "resolved_at": 12.5,
+    }
+    out = _negotiation_from_dict(data)
+    assert out["comms_established_at"] == 10.0 and out["resolved_at"] == 12.5
+    assert out["messages"][0].speaker == "Robot A"
+    assert out["messages"][0].intent is Intent.PROPOSE
 
 
 def test_build_episode_data_with_a_real_negotiation_uses_trace_timestamps_not_boundary_crossing():

@@ -252,7 +252,7 @@ live across 3 processes - the world's tool-handling spans nest into the
 calling robot's trace. `mcp` (like a2a-sdk) ships its own OTel spans, free
 once a `TracerProvider` exists. Still local-only.
 
-**Phase 10b-2 code done (D38): Firestore-backed world, behind a store seam.**
+**Phase 10b-2 done (D38): Firestore-backed world, behind a store seam.**
 `world_server.py`'s in-memory `STATE` singleton is now one of two backends in
 `world_store.py`. `InMemoryWorldStore` stays the **default** - `python
 world_server.py`, the test suite, single-process runs are all unchanged, no
@@ -262,15 +262,34 @@ world_server.py`, the test suite, single-process runs are all unchanged, no
 instances can't both "enter" a stale corridor). New `reset_world()` MCP tool
 + `--reset` flag for episode lifecycle (the doc persists across restarts
 now). `agent.py` unchanged - robots are MCP clients, backend-agnostic.
-**In-memory path verified** (121 tests + a live 3-terminal `--world-url`
-episode); **the real Firestore read-modify-write is not yet run** - the
-local emulator needs a JRE this machine lacks, so verify against real
-Firestore at the top of 10b-3.
+**Verified live** against real Firestore (`(default)` DB, `us-central1`):
+standalone store exercise + a full 3-process `--firestore --reset` episode,
+18-entry log persisted in `world/current` and read back.
 
-**10b-3 remains:** create the Firestore DB + verify `--firestore` live, then
-deploy all three as Cloud Run Services (`robot-a` converts Job→Service) with
-`--policy gemini --trace` and `OTEL_TRACES_EXPORTER=gcp`, and verify the
-trace tree in Cloud Trace. See `PLAN.md` §5.
+**Phase 10b-3a done: the deployed negotiation, on Gemini, traced to Cloud
+Trace.** No code changes - `robot-a` (Job) and `robot-b` (Service) redeployed
+with `--policy gemini --vertex-project corridor-agents --trace` +
+`OTEL_TRACES_EXPORTER=gcp` (both SAs granted `roles/cloudtrace.agent`).
+`gcloud run jobs execute robot-a` runs a real cloud-to-cloud Gemini
+negotiation; Cloud Trace shows one trace spanning both services -
+`negotiation.episode`/`turn`/`llm.respond` (`provider=gemini`) on robot-a,
+the `POST /` handling + a2a-sdk spans on robot-b, initiator `POST` parenting
+responder `POST /`.
+
+**D39: `visualize_network.py --firestore`.** The network replay reads the
+whole episode from `world/current` (grid from `world.py` constants, movement
+log from D38's array, negotiation transcript from a new `negotiation` field
+written by a `record_negotiation` MCP tool). Works for a Cloud Run episode -
+nothing local to query, no trace file. `build_episode_data` and the template
+are unchanged. Verified: a `--firestore` Gemini episode →
+`visualize_network.py --firestore --firestore-project corridor-agents` →
+correct replay (`priority: Robot A`, `correct: true`).
+
+**10b-3b remains:** connect the deployed robots to a deployed world Service
+(`--world-url`) - needs a `run_robot` idle mode (Services can't exit on
+`reached_target`), MCP-over-OIDC (`--auth` only covers A2A today), and
+`robot-a` Job→Service. Then all three run world-integrated and the D39
+visualizer replays a *fully* deployed episode. See `PLAN.md` §5.
 
 **Phase 9 (three or more robots) is deliberately skipped for now** - it's
 a `world.py` rewrite plus a real N-way-negotiation design fork, and the
@@ -287,7 +306,7 @@ out Phase 8 and 10b together. See `PLAN.md` §5.
 
 ```bash
 source .venv/bin/activate        # Python 3.13; required in each new shell
-python -m pytest tests/ -q       # 121 tests, no API calls, ~0.03s
+python -m pytest tests/ -q       # 125 tests, no API calls, ~0.03s
 python run.py                    # one negotiation, deterministic policies
 python run.py --a llm --b llm    # needs: cp .env.example .env && source .env
 python eval.py                   # measurement sweep, deterministic cases only
@@ -322,6 +341,12 @@ python agent.py --scenario <id> --side b --policy always_yield --port 9002 --pee
 # D19: after the episode above finishes, render it (world_server.py must
 # still be running - it holds the log)
 python visualize_network.py --scenario <id> --a stubborn --b always_yield --world-url http://127.0.0.1:9500/mcp
+
+# D39: same replay, but read from Firestore instead of a live world_server.py
+# + local trace file - for an episode that ran with --firestore (locally or
+# on Cloud Run). Grid comes from world.py constants; log + transcript from
+# world/current. Nothing local needs to still be running.
+python visualize_network.py --scenario <id> --a gemini --b gemini --firestore --firestore-project corridor-agents
 
 # D29: raw CSV instead of (or alongside) the HTML replay - same timing,
 # world_server.py must still be running. Add --debug-log to each agent.py

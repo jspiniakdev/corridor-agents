@@ -1563,6 +1563,23 @@ What's genuinely shared vs. what's provider-specific, since that's the whole poi
 
 **`agent.py` unchanged** - the robots are MCP clients, they don't know or care which backend the world uses. `simulate.py`/`eval.py`/`world_eval.py` unchanged (single-process, never touch `world_server.py`).
 
-**Verified:** the in-memory path fully - 121 tests plus a live 3-terminal `--world-url` episode after the refactor (both robots reach target, correct outcome). **Firestore path: not yet live.** The local Firestore emulator needs a Java runtime this machine doesn't have; `FirestoreWorldStore` construction and the transaction-decorator wiring are checked, and everything that decides an outcome (`_resolve`, `state_from_positions`) is pure and unit-tested, but a real read-modify-write against Firestore is pending - either `brew install` a JRE for the emulator, or verify against real Firestore as the first step of 10b-3 (which needs the database created anyway).
+**Verified:** in-memory path fully - 121 tests plus a live 3-terminal `--world-url` episode after the refactor. **Firestore path verified live against real Firestore** (the emulator needs a JRE this machine lacks, so we skipped it and went straight to the real thing - the `(default)` database in `us-central1`, `roles/datastore.user` on the impersonated SA): a standalone `FirestoreWorldStore` exercise (reset → transactional propose ×3 → get_log → reset), then a full 3-process `world_server.py --firestore --reset` episode - both robots reached target, the 18-entry episode log persisted in `world/current` and read back correctly. The transaction wiring that the unit tests couldn't reach is now covered.
 
 **Would change our mind:** if `log` ever grows unbounded (long episodes, or many episodes kept), move it to `world/current/log/{auto-id}` as a subcollection - a localized change, `get_log()` becomes a collection read. Not before it's an actual problem.
+
+## D39 — visualize_network.py --firestore: the replay works against the GCP world
+
+**Decided:** the network replay tool reads its whole episode from the `world/current` Firestore document instead of a live `world_server.py` + a local trace file, so a replay works when the robots ran on Cloud Run (10b-3) and there is nothing local to query.
+
+Three inputs, three redirects:
+- **grid** — `world_store.grid_facts()`, a shared function returning the exact dict `world_server.py`'s `get_map()` returns (which now just calls it). The `--firestore` path never makes an MCP call at all; the grid is `world.py` constants, no fetch needed.
+- **movement log** — `world/current.log`. Already there since D38; the visualizer just reads the array.
+- **negotiation transcript** — new. `WorldStore` gains `set_negotiation()`/`get_negotiation()`; a `record_negotiation(messages, comms_established_at, resolved_at)` MCP tool on `world_server.py` writes it to `world/current.negotiation`. `reset_world()` clears it (new episode → new transcript).
+
+**Why an MCP tool, not agent.py writing Firestore:** the robots already talk to the world over MCP and the world already owns all storage (D38). `run_robot` still writes the local `negotiation_trace.json` for the pure-local workflow *and* stashes the payload in a `pending_trace` holder that the movement loop drains with `await mcp_call(world, "record_negotiation", ...)` — the holder indirection because `on_resolved` is a sync callback and can't await, the same pattern `run_robot` already uses for `priority_holder`/`comms_established_at`.
+
+**`build_episode_data` is unchanged** — both paths hand it the same `(grid, entries, messages)`, so `visualize_template.html` needs zero changes and every downstream computation (winner from `check_agreement`, timing from the real-timestamp correlation, D22) is identical.
+
+**Verified live:** a world-integrated `--firestore` Gemini episode (`dying_battery_vs_fragile_cargo`) → `record_negotiation` landed the 6-message transcript in `world/current.negotiation` → `visualize_network.py --firestore --firestore-project corridor-agents` produced correct `episode_data` (`priority: Robot A`, `should_go_first: Robot A`, `correct: true`, decision at step 5, 19 collapsed rows from 64). The HTML renders identically to the MCP path. 125 tests.
+
+**Would change our mind:** if a control UI ever needs several concurrent episodes, `world/current` (one fixed doc, D38) stops being enough and the negotiation moves with the rest of the episode state into `episodes/{id}` — the `record_negotiation`/`get_negotiation` seam doesn't change, only what document it writes.

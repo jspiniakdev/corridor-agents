@@ -66,3 +66,23 @@ python run.py --a llm --b llm
   story (including how each one was actually diagnosed) in
   `docs/DECISIONS.md` D33 - worth reading before assuming a fresh GCP
   project "just works" the way it used to.
+- **Vertex AI quota is 0 on a fresh project and the increase is
+  auto-denied.** `anthropic-claude-sonnet` on Vertex (D34) needs a quota
+  bump that Google's automated system rejects on a project with no billing
+  history - support ticket open, no resolution yet. Gemini's Vertex quota
+  (D36) is *not* gated, so `--policy gemini` is the working path for the
+  deployed pipeline meanwhile.
+- **Firestore** (D38, Phase 10b-2): the `(default)` database is created in
+  `us-central1` (Native mode), same region as Cloud Run. Its location is
+  **permanent** - to change it you delete and recreate. Local dev normally
+  uses the emulator, but that needs a Java runtime this machine doesn't
+  have (`java` is an install stub), so `--firestore` is verified straight
+  against the real database instead. `roles/datastore.user` is granted to
+  `robot-a@corridor-agents.iam.gserviceaccount.com` (the SA the local ADC
+  impersonates); `world_server`'s own SA gets it in 10b-3.
+- The local `gcloud` config drifted from this project once (was pointed at
+  an unrelated `cubebackup-*` project); `gcloud config set project
+  corridor-agents` fixed it. `gcloud auth application-default
+  set-quota-project` fails here ("not user credentials") because the ADC
+  is an impersonated service account, not a plain login - that's expected,
+  not a problem.

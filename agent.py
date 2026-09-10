@@ -442,7 +442,8 @@ async def mcp_call(client, name, **args):
     traceparent."""
     import json
 
-    with tracing.span(f"mcp.{name}", **args):
+    scalars = {k: v for k, v in args.items() if isinstance(v, (str, int, float, bool))}
+    with tracing.span(f"mcp.{name}", **scalars):  # record_negotiation's `messages` list isn't a valid span attr
         result = await client.call_tool(name, args)
     return json.loads(result.content[0].text)
 
@@ -498,20 +499,22 @@ def write_negotiation_trace(history, message_times, comms_established_at, resolv
     import os
 
     os.makedirs(os.path.dirname(NEGOTIATION_TRACE_PATH), exist_ok=True)
+    payload = negotiation_trace_payload(history, message_times, comms_established_at, resolved_at)
+    with open(NEGOTIATION_TRACE_PATH, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"wrote {NEGOTIATION_TRACE_PATH}")
+
+
+def negotiation_trace_payload(history, message_times, comms_established_at, resolved_at):
+    """The transcript in the shape both write_negotiation_trace (local
+    file) and run_robot's record_negotiation MCP call (D39, so
+    visualize_network.py can fetch it from the world) hand around:
+    {"messages": [<wire dict + "timestamp">, ...], "comms_established_at",
+    "resolved_at"}."""
     messages = history_to_list(history)
     for message, sent_at in zip(messages, message_times):
         message["timestamp"] = sent_at
-    with open(NEGOTIATION_TRACE_PATH, "w") as f:
-        json.dump(
-            {
-                "messages": messages,
-                "comms_established_at": comms_established_at,
-                "resolved_at": resolved_at,
-            },
-            f,
-            indent=2,
-        )
-    print(f"wrote {NEGOTIATION_TRACE_PATH}")
+    return {"messages": messages, "comms_established_at": comms_established_at, "resolved_at": resolved_at}
 
 
 ROBOT_STATUS_PATH_TEMPLATE = "experiments/results/robot_status_{side}.jsonl"
@@ -591,6 +594,7 @@ async def run_robot(
     dial_holder = {"task": None}
     incoming_active = {"value": False}
     comms_established_at = {"value": None}
+    pending_trace = {"value": None}  # D39: a negotiation payload waiting to be handed to the world over MCP - the loop drains it (on_resolved is a sync callback and can't await)
     private_situation = me.situation
 
     status_log_path = ROBOT_STATUS_PATH_TEMPLATE.format(side=side) if debug_log else None
@@ -614,6 +618,7 @@ async def run_robot(
         print(f"{me.name}: negotiated outcome (incoming task): {outcome}")
         log_status(f"negotiated outcome (incoming task): {outcome}")
         write_negotiation_trace(history, message_times, comms_established_at["value"], time.time())
+        pending_trace["value"] = negotiation_trace_payload(history, message_times, comms_established_at["value"], time.time())
         dial_task = dial_holder["task"]
         if dial_task is not None and not dial_task.done():
             print(f"{me.name}: outcome already known from an incoming call - cancelling my own outbound dial")
@@ -683,7 +688,18 @@ async def run_robot(
                                 priority_holder["value"], dial_history, dial_message_times = dial_task.result()
                                 log_status(f"dial resolved: {priority_holder['value']}")
                                 write_negotiation_trace(dial_history, dial_message_times, comms_established_at["value"], time.time())
+                                pending_trace["value"] = negotiation_trace_payload(
+                                    dial_history, dial_message_times, comms_established_at["value"], time.time()
+                                )
                         dial_holder["task"] = None
+
+                    if pending_trace["value"] is not None:
+                        # D39: hand the transcript to the world so
+                        # visualize_network.py can fetch it (from Firestore,
+                        # or over MCP) instead of a local file the deployed
+                        # robot's container would never share.
+                        await mcp_call(world, "record_negotiation", **pending_trace["value"])
+                        pending_trace["value"] = None
 
                     action = decide_movement(obs, priority_holder["value"], me.name, other.name)
                     if tick is not None:

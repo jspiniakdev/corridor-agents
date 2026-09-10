@@ -142,3 +142,17 @@ def test_reset_world_returns_both_robots_to_start_with_an_empty_log():
     assert _state().a.position == 1
     assert _state().b.position == B_START
     assert ws.get_log() == {"entries": []}
+
+
+def test_record_and_get_negotiation_round_trip():
+    reset_state()
+    assert ws.get_negotiation() == {"negotiation": None}
+
+    msgs = [{"speaker": "Robot A", "intent": "propose", "goes_first": "Robot A", "text": "me first", "timestamp": 1.0}]
+    assert ws.record_negotiation(msgs, 0.5, 2.0) == {"recorded": 1}
+
+    assert ws.get_negotiation() == {
+        "negotiation": {"messages": msgs, "comms_established_at": 0.5, "resolved_at": 2.0}
+    }
+    ws.reset_world()
+    assert ws.get_negotiation() == {"negotiation": None}
