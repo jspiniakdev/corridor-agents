@@ -328,10 +328,12 @@ call, not a poisoned long-lived client), retries with capped backoff
 `PYTHONUNBUFFERED=1` in the Dockerfile (Cloud Run was dropping the robots'
 `print`s). **Verified live local 3-terminal** (kill -9 the world mid-idle →
 robots log retries and stay up → restart + `trigger_episode.py` → rejoin
-clean); 133 unit tests. **Deployed** (robot-a rev 00002, robot-b rev 00008,
-commit `827b356`) - clean episode + robot stdout now legible in Cloud
-Logging; the hourly `exit(1)` should be gone (needs ~1-2h across a token
-boundary to fully confirm). See `DECISIONS.md` D42.
+clean); 133 unit tests. **Deployed** `827b356`, then rolled forward with
+D43/D44 (`6f6aa13`, robot-a rev 00003, robot-b rev 00009). Old code
+crashed `exit(1)` hourly (18:50, 19:50, 20:51 UTC); **zero crashes since
+the 21:06 deploy** - the first revision crossed the 40-min token-cache
+refresh with no incident. Strong but not yet a full multi-hour soak. See
+`DECISIONS.md` D42.
 
 **D43: the world's "too fast" move floor.** `propose_action` wasn't
 idempotent - a re-sent MCP call (retry, lost response, second instance)
@@ -359,10 +361,15 @@ outcome, nothing re-applied → true exactly-once. `one_episode` restarts
 on a mid-run id change; `record_negotiation` re-stamps `resolved_at` on
 the world's clock. Stores hold it (`FirestoreWorldStore`: `episode_id` /
 `nonce_a`/`nonce_b` / `last_result_a`/`last_result_b` doc fields in the
-txn); `_resolve`/`world.py`/`simulate.py` untouched. 146 tests;
-local-verified (3 episodes clean; stale id + repeat nonce + stale
-transcript all refused live). **D43+D44 deploy together** (all three
-Services). See the design memory / `PLAN.md` §5.
+txn); `_resolve`/`world.py`/`simulate.py` untouched. 146 tests.
+**Deployed** 2026-09-10 (world rev 00003, robot-a 00003, robot-b 00009,
+commit `6f6aa13`) alongside D43: clean episode (`a=8 b=1`, agreed on B),
+zero `too_fast`/`stale_episode` on the normal path, and the deployed
+Firestore world verified refusing a stale `episode_id`, deduping a repeat
+`nonce` (position held), and refusing a stale `record_negotiation`. The
+mid-run-restart path (`one_episode` bails on an id change) was also seen
+firing for real. `resolved_at` in `world/current.negotiation` is now
+world-clock, in the same ~35 s window as the movement log. See the design memory / `PLAN.md` §5.
 
 **Cost note:** the two robot Services bill ~$15-40/mo combined even idle
 (`--min-instances=1`). Delete them between demos - `--min-instances=0` isn't
@@ -373,14 +380,14 @@ a `world.py` rewrite plus a real N-way-negotiation design fork, and the
 discovery/broadcast half (Firestore registry, Pub/Sub) only earns its keep
 at 3+ robots. Staying at 2 robots.
 
-**Next:** (1) D42 deployed (robot-a/b) - watch for zero `exit(1)` across a
-token boundary; (2) deploy D43+D44 (all three Services), preceded by a
-`trigger_episode.py`; (3) *then* fix the `visualize_network.py --firestore`
-render to close 10b-3b-ii, on clean data (`resolved_at` now correlates with
-the world log); (4) Phase 8 - Claude-on-Vertex still **blocked on a GCP
-quota increase** (auto-denied, support ticket open); once it clears,
-`--policy claude` on Vertex is a policy swap, not an infra change (D36).
-See `PLAN.md` §5.
+**Next:** (1) D42/D43/D44 all deployed - keep an eye on Cloud Logging for
+`exit(1)` over the next few hours (should be none); (2) fix the
+`visualize_network.py --firestore` render to close 10b-3b-ii, now that the
+data is clean (`resolved_at` world-clock, no stale transcript); (3) Phase 8
+- Claude-on-Vertex still **blocked on a GCP quota increase** (auto-denied,
+support ticket open); once it clears, `--policy claude` on Vertex is a
+policy swap, not an infra change (D36). See `PLAN.md` §5. Cost: the two
+robot Services still bill ~$15-40/mo idle - delete them between demos.
 
 ## How to run things
 
