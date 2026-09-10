@@ -300,6 +300,20 @@ class GeminiPolicy:
         return self._client
 
     @staticmethod
+    def _budgets(model: str) -> tuple[int, int]:
+        """(thinking_budget, max_output_tokens) for a model. gemini-2.5-flash
+        "thinks" by default and those tokens come out of max_output_tokens -
+        on a hard turn it burned the whole budget reasoning and emitted no
+        function call at all (D36). flash lets you disable thinking entirely
+        (thinking_budget=0); -pro and later reject 0, so give them a bounded
+        budget plus enough ceiling that the structured reply still fits after
+        it. Either way this is a bounded structured reply, not a reasoning
+        task."""
+        if "flash" in model:
+            return 0, 500
+        return 512, 2048
+
+    @staticmethod
     def _tool(me_name: str, other_name: str):
         """The same respond() contract as LLMPolicy._tool, in Gemini's
         function-declaration dialect. goes_first is nullable rather than
@@ -344,15 +358,11 @@ class GeminiPolicy:
         turns_left = max_turns - len(history)
         system_prompt = SYSTEM.format(name=me.name, other=other.name, situation=me.situation, turns_left=turns_left)
 
+        thinking_budget, max_output_tokens = self._budgets(self.model)
         config = types.GenerateContentConfig(
             system_instruction=system_prompt,
-            max_output_tokens=500,
-            # gemini-2.5-flash "thinks" by default and those tokens come out
-            # of max_output_tokens - on a hard turn it burned the whole
-            # budget reasoning and emitted no function call at all. This is
-            # a bounded structured reply, not a reasoning task; turn it off,
-            # matching LLMPolicy which uses no extended thinking either.
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
+            max_output_tokens=max_output_tokens,
+            thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
             tools=[self._tool(me.name, other.name)],
             tool_config=types.ToolConfig(
                 function_calling_config=types.FunctionCallingConfig(mode="ANY", allowed_function_names=["respond"])

@@ -164,6 +164,15 @@ def test_gemini_tool_schema_scopes_goes_first_to_this_negotiation():
     assert schema["properties"]["intent"]["enum"] == [i.value for i in Intent]
 
 
+def test_gemini_budgets_disable_thinking_on_flash_but_not_pro():
+    """flash accepts thinking_budget=0 (D36); gemini-2.5-pro and later
+    reject it - they get a bounded budget and a bigger ceiling instead."""
+    assert GeminiPolicy._budgets("gemini-2.5-flash") == (0, 500)
+    assert GeminiPolicy._budgets("gemini-2.5-flash-lite") == (0, 500)
+    pro_thinking, pro_max = GeminiPolicy._budgets("gemini-2.5-pro")
+    assert pro_thinking > 0 and pro_max > 500
+
+
 def test_gemini_client_is_a_vertex_genai_client():
     """genai.Client(vertexai=True, ...) construction doesn't touch the
     network - only the client type/mode is under test."""
