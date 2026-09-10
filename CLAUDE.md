@@ -328,7 +328,10 @@ call, not a poisoned long-lived client), retries with capped backoff
 `PYTHONUNBUFFERED=1` in the Dockerfile (Cloud Run was dropping the robots'
 `print`s). **Verified live local 3-terminal** (kill -9 the world mid-idle →
 robots log retries and stay up → restart + `trigger_episode.py` → rejoin
-clean); 132 unit tests. **Not yet redeployed.** See `DECISIONS.md` D42.
+clean); 133 unit tests. **Deployed** (robot-a rev 00002, robot-b rev 00008,
+commit `827b356`) - clean episode + robot stdout now legible in Cloud
+Logging; the hourly `exit(1)` should be gone (needs ~1-2h across a token
+boundary to fully confirm). See `DECISIONS.md` D42.
 
 **Also flagged in the same review, not yet fixed:** `propose_action` is not
 idempotent (a re-sent MCP call = a real extra move - the 0.28s double-step
