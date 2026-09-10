@@ -170,9 +170,15 @@ def build_world_client(world_url, auth):
         return Client(world_url)
 
     import httpx2
+    from urllib.parse import urlsplit
     from mcp.client.streamable_http import streamable_http_client
 
-    token = get_id_token(world_url)
+    # Cloud Run validates a token's `aud` against the Service's base URL,
+    # not the request path - so the audience is scheme://host, even though
+    # the MCP endpoint itself is <base>/mcp. (D33's A2A --peer-url had no
+    # path, so this never came up before.)
+    parts = urlsplit(world_url)
+    token = get_id_token(f"{parts.scheme}://{parts.netloc}")
     authed = httpx2.AsyncClient(headers={"Authorization": f"Bearer {token}"})
     return Client(streamable_http_client(world_url, http_client=authed))
 
