@@ -72,8 +72,9 @@ Cloud Run services and a Firestore-backed loop world.
   robot is yielding / blocked** (stopped at a corridor mouth waiting its turn).
   A robot that is moving — including free-flow and its turn through a corridor —
   loses nothing.
-- **Default drain 20/tick** (≈5 ticks of waiting kills a baseline robot);
-  scenarios set higher for urgent robots, lower for patient ones.
+- Drain rate is scenario-set per robot: higher for urgent robots, lower for
+  patient ones. Concrete numbers and the length/drain/life coupling are in the
+  **World spec** section below.
 - `urgency` is **fixed per robot for the whole run** (re-rolled only between
   runs, like a seed). Stable "character" is what later reputation work needs.
 - Life reaches 0 → the robot is **removed from the world** (not left as an
@@ -116,6 +117,120 @@ Each robot privately holds its `urgency`, its remaining `life`, and its
 contender's identity. A single prompt with every robot's urgency and life would
 schedule the corridors optimally — so the information asymmetry is real, not
 decoration.
+
+---
+
+## World spec — concrete numbers (11a starting point)
+
+All of this is a starting point to tune once 11a runs; the *shape* (loop,
+directional lanes, two asymmetric corridors, survival scoring) is settled.
+
+### Coordinate model
+One integer `pos ∈ [0, L)` measured **clockwise around the perimeter**, plus a
+`lane` bit. Direction is fixed per robot: **CW → `pos` increases**, CCW
+decreases, both mod `L`. `(x, y)` for rendering is derived from `pos`. The world
+logic needs only `L`, the two corridor ranges, and the 4 corner positions.
+
+### Dimensions
+Rectangle **W = 16** (top & bottom), **H = 6** (left & right) → **`L = 44`**.
+
+```
+        TL(0)                North [8–13]              TR(16)
+          ●━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━●
+          ┃       ┃    1-lane    ┃                   ┃
+   left   ┃       ┗━━━━━━━━━━━━━━┛                   ┃  right
+   side   ┃                                         ┃  side
+ pos 38–43┃                          ┏━━━━━━━━┓      ┃  pos 16–21
+          ●━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━┻━━━━━━●
+        BL(38)                    South [25–28]      BR(22)
+
+  CW  = pos increasing: TL→TR (top), TR→BR (right), BR→BL (bottom), BL→TL (left)
+  CCW = pos decreasing
+```
+
+| | value |
+|---|---|
+| Perimeter `L` | 44 |
+| Corner / spawn positions | TL 0, TR 16, BR 22, BL 38 |
+| **North corridor** | `pos 8–13`, length **6**, upper side, shifted toward TR |
+| **South corridor** | `pos 25–28`, length **4**, lower side, shifted toward BR |
+| Sensor range | 10 (a robot at its boundary sees the whole corridor + ~4 cells past the far mouth) |
+
+### Boundary (stop-and-wait) cells and queue room
+
+| corridor | CW boundary | CCW boundary | CW approach room | CCW approach room |
+|---|---|---|---|---|
+| North `[8–13]` | 7 | 14 | TL→7 = **7 cells** | TR→14 = **2 cells** |
+| South `[25–28]` | 24 | 29 | BR→24 = **2 cells** | BL→29 = **9 cells** |
+
+Beyond the approach room, a queue backs up around the previous corner onto the
+adjacent side.
+
+### The asymmetries this bakes in
+1. **Corridor length 6 vs 4** — losing North costs ~50% more wait than losing
+   South, so robots should fight harder for North.
+2. **Queue room flips by direction** — CW robots get a long queue at North, a
+   tight one at South; CCW robots get the mirror. Each direction has one "easy"
+   corridor and one "hard" one, and they are opposite.
+3. **North is both the long corridor and the tight-queue one for CCW** → CCW
+   robots have it slightly worse overall. Deliberate.
+4. **Inter-corridor gaps** — 12 cells on the short hop, 24 on the long breather,
+   both directions, phased oppositely around the loop.
+
+### Life / urgency (coupled numbers)
+`life = 100`, fixed. A robot drains `urgency` points **per wait-tick while
+blocked by a corridor** (queued, or holding for the winner to clear). "Lost
+negotiations until death" is a function of `urgency × corridor length`:
+
+| `urgency` | role | survives a lost North (~6-tick wait) | a lost South (~4-tick) |
+|---|---|---|---|
+| 3–5 | patient | ~3–4 losses | 5+ |
+| **10** (proposed baseline) | normal | 1, dies on the 2nd | 2, dies on the 3rd |
+| 18–22 | urgent | 0 — one lost North = death | barely 1 |
+
+The initial thought was a baseline of 20; at 20 a normal robot dies from a
+single lost North encounter, which collapses a multi-robot run fast. **Baseline
+10 is the recommendation**, 18–22 reserved for explicitly urgent robots — final
+number to confirm against a real 11a run.
+
+Correct outcome per encounter = the higher-`urgency` (closer-to-death) robot goes
+first.
+
+### Run and config
+- **Run length: 280 ticks** — ~6 laps, ~12 corridor crossings per robot.
+- **Config format:**
+  ```yaml
+  robots:
+    - {name: R1, corner: TL, direction: CW,  urgency: 18, situation: "..."}
+    - {name: R2, corner: TR, direction: CCW, urgency: 5,  situation: "..."}
+  ```
+  Max 8 robots; each `(corner, direction)` slot used at most once. `urgency` and
+  the stakes in `situation` stay hidden from policies — only the prose is shown.
+- **Starter configs:**
+  - **`duel`** (11a) — R1 TL/CW urgency 18, R2 TR/CCW urgency 5. They meet
+    head-on at North, then South, then North… repeatedly. Expected: R1 wins every
+    time, R2 yields and slowly bleeds but survives; R1 never waits.
+  - **`standoff`** — both urgency 20, both `never_yield` → deadlock at the first
+    corridor → both bleed out. Confirms deadlock is lethal and death works.
+  - **`crowd`** (11b) — 6 robots, mixed corners / directions / urgency.
+    Exercises queuing and "winner passes, re-negotiate".
+
+### Known tight spots / to settle at implementation
+- **TR robot heading CCW → North: 2-cell approach** (was 0 — corridor used to
+  touch the corner). Better, but if the cold-start-into-negotiation pathology
+  still shows, shift North to `[6,11]` (4-cell clearance) at the cost of the
+  "North hugs TR" flavour.
+- **BR robot heading CW → South: 2-cell approach** (symmetric to the above).
+  Either shift South to `[27,30]` to match, or just don't use that spawn slot in
+  the default configs.
+- Does life drain during the **LLM negotiation wall-clock** (11c only)? The world
+  has no clock (D17) — ticks are polls, a negotiating robot isn't polling, so
+  under the current architecture it does not drain mid-negotiation. Fine for
+  11a–11b.
+- Same-direction **convoy** through a corridor — disallowed in 11a; the numbers
+  above assume one robot per corridor at a time.
+- Optional extra asymmetry: unequal left/right sides (e.g. H_left 8, H_right 6 →
+  `L = 46`) warps the long-way-around gaps further at no cost.
 
 ---
 
