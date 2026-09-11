@@ -1624,7 +1624,7 @@ Both robots carry `OTEL_TRACES_EXPORTER=gcp`. **`robot-a` converted from the D33
 - `robot-a` logs show the `--serve` lifecycle across episodes: `reached target` → `idle - waiting for reset_world` → `world reset - new episode`.
 - **Cloud Trace: one trace (~307 spans), all three Services.** `world.episode` → `world.tick` fans into (a) the MCP world calls, cross-process — `mcp.get_observation` → mcp-sdk `tools/call` → `world.get_observation` on the world Service — and (b) the full A2A negotiation subtree — `negotiation.episode` → `negotiation.turn` → `llm.respond` (Gemini) + `a2a.client…send_message_streaming` → (into the peer) `POST /` → `negotiation.handle` → `llm.respond`. The `record_negotiation` write is its own in-trace chain (`mcp.record_negotiation` → `world.record_negotiation`).
 
-**Not yet verified — `visualize_network.py --firestore` against the deployed episode.** The Firestore *read* is correct: the generated HTML embeds the grid, the 4-message transcript, and a 17-step movement log (ending `a=8 b=1`) pulled from `world/current` alone. But the rendered page is wrong — the bug is downstream of `main_firestore`, in `_write_html` / `visualize_template.html` getting a data shape it doesn't expect, or a browser-side JS error. Under investigation; **10b-3b-ii is not fully closed until this renders.**
+**`visualize_network.py --firestore` against the deployed episode — RESOLVED, no code change (see D46).** What looked like a render bug (right data, wrong page) was entirely downstream of the bad data D42–D45 fixed: a stale transcript and a robot-clock `resolved_at` that pointed `find_step_at_or_after` at the wrong step. Against clean data, the unmodified `_write_html` / `visualize_template.html` renders correctly. **10b-3b-ii is closed.**
 
 **Gotchas:**
 - **`gcloud iam service-accounts create world` is rejected** — account IDs must be 6–30 chars. Used `world-server`.
@@ -1878,3 +1878,41 @@ Phase 3's `compose_observation()` got the same line (deriving the other robot's
 direction as `-my_direction`), so `simulate.py`/`run.py` LLM runs stay in sync.
 Deterministic policies don't read the text; no scoring impact. 150 tests.
 Deploys with D43/D44 (all three Services).
+
+---
+
+## D46 — closing Phase 10b-3b-ii: the visualizer was never broken, the data was
+
+D41 left one loose end: `visualize_network.py --firestore` read `world/current`
+correctly but rendered the wrong replay - suspected as a `_write_html` /
+`visualize_template.html` bug, "under investigation."
+
+**It wasn't a template bug.** Regenerated against a clean deployed episode
+(post D42-D45: real `episode_id`, world-stamped `resolved_at`, no stale
+transcript), the unmodified template renders correctly - checked with a
+headless jsdom harness (no browser available in this environment): loads the
+generated HTML, executes its inline script for real, steps through every
+`goToFrame(i)`, and reads back the DOM. Zero JS errors across all 25 frames;
+markers move the right direction (0%→100% / 100%→0%), "establishing comms"
+and the negotiation dialogue appear at the right steps, priority resolves to
+the correct robot at the correct step, and the final verdict reads "episode
+completed · priority: Robot B · should go first: Robot B · (correct)".
+
+The original symptom - right data embedded, wrong replay shown - was
+`find_step_at_or_after(entries, resolved_at)` doing exactly what a stale,
+wrong-clock `resolved_at` told it to: point at the wrong log step. D44 fixed
+the input; the function and the template were always correct for well-formed
+input.
+
+**Verification method worth keeping:** `visualize_network.py` /
+`visualize_template.html` had no test coverage of the *rendered* output at
+all - `test_visualize_network.py` only covers `build_episode_data()`'s data
+shape, never whether the template actually displays it right. A jsdom-based
+frame-stepper (load real generated HTML, `runScripts: "dangerously"`, call
+`goToFrame(i)` for every `i`, assert on `tick-label` / marker positions /
+`verdict-text`) is cheap, needs no browser, and would have caught this
+class of bug directly instead of requiring a live deploy + manual read to
+even notice. Not implemented as a permanent test yet - a candidate for
+`tests/test_visualize_network.py` if the template gets touched again.
+
+**Phase 10b-3b-ii, and Phase 10 overall, are closed.**

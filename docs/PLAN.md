@@ -379,7 +379,7 @@ Split into sub-phases because 10b turned out to be three separate pieces:
   `trigger_episode.py` starts an episode. Verified 3-terminal: two `--serve`
   robots, 3 episodes, no restart.
 
-- **10b-3b-ii — deploy. DONE (D41), one loose end.** Three Cloud Run
+- **10b-3b-ii — deploy. DONE (D41, closed by D46).** Three Cloud Run
   Services: `world` (`world-server@` SA, `roles/datastore.user` +
   `roles/cloudtrace.agent`, `--firestore --trace`, scale-to-zero), `robot-a`
   and `robot-b` (`--world-url --serve --auth --trace`,
@@ -392,29 +392,38 @@ Split into sub-phases because 10b turned out to be three separate pieces:
   **A pre-visualizer review then found three deployed-path defects** (the
   broken render turned out to be downstream of bad data, not a template
   bug):
-  1. **Token expiry crash-loop — FIXED (D42).** The `--auth` OIDC token was
-     fetched once at startup and never refreshed; the robots 401'd and
-     `exit(1)`'d on a ~1h cycle. `WorldChannel` now builds a fresh
-     authenticated client per call and retries. Verified live 3-terminal
-     (kill/restart the world under two `--serve` robots); redeploy pending.
-  2. **`propose_action` is not idempotent — FIXED (D43).** A re-sent MCP
-     call applied a second real move (the 0.28s double-step). The world now
-     enforces a per-side 0.75s minimum move interval (`too_fast` →
-     resolved `wait`, nothing applied); `WorldChannel` no longer retries
-     `propose_action` (a failed one is re-proposed next poll). Unit +
-     local-verified; deploys with #3 (needs the `world` Service).
-  3. **`record_negotiation` had no episode guard — FIXED (D44).** A late
-     write from the livelocked episode 1 clobbered `world/current`, leaving
-     a fresh-log/stale-transcript mix. `reset_world()` now mints an
-     `episode_id`; `get_observation` returns it; every robot→world write
-     carries it and mismatches are refused. Plus a per-move `nonce` (true
-     exactly-once `propose_action`, closing D43's residual) and
+  1. **Token expiry crash-loop — FIXED (D42), deployed.** The `--auth` OIDC
+     token was fetched once at startup and never refreshed; the robots
+     401'd and `exit(1)`'d on a ~1h cycle. `WorldChannel` builds a fresh
+     authenticated client per call and retries. Confirmed dead in
+     production: zero `exit(1)` across multiple would-be hourly boundaries
+     post-deploy (old code crashed reliably every ~1h).
+  2. **`propose_action` is not idempotent — FIXED (D43), deployed.** A
+     re-sent MCP call applied a second real move (the 0.28s double-step).
+     The world enforces a per-side 0.75s minimum move interval (`too_fast`
+     → resolved `wait`, nothing applied); `WorldChannel` no longer retries
+     `propose_action`.
+  3. **`record_negotiation` had no episode guard — FIXED (D44), deployed.**
+     A late write from the livelocked episode 1 clobbered `world/current`,
+     leaving a fresh-log/stale-transcript mix. `reset_world()` mints an
+     `episode_id`; every robot→world write carries it, mismatches refused.
+     Plus a per-move `nonce` (exactly-once `propose_action`) and
      `record_negotiation` re-stamping `resolved_at` on the world's clock.
-     `one_episode` restarts on a mid-run id change. 146 tests;
-     local-verified.
+  4. **`visualize_network.py --firestore` render — RESOLVED, no code
+     change (D46).** Was never a template bug - entirely downstream of the
+     data #3 fixed. Verified with a headless jsdom frame-stepper against a
+     clean deployed episode: all frames render correctly.
 
-  D43 + D44 deploy together (all three Services). Then the
-  `visualize_network.py --firestore` render, against clean data.
+  Also along the way: `gemini-2.5-pro` support (model-aware thinking
+  budget - pro rejects `thinking_budget=0`), an A2A client timeout fix
+  (httpx's 5s default livelocked a pro negotiation - one LLM turn on the
+  peer outran it), `D45` (observation carries the other robot's distance
+  to the corridor entrance - closes a gap where an LLM could claim a false
+  proximity advantage), and `POLL_INTERVAL_SECONDS` 1.0→0.4 (the agent
+  sleep is a politeness interval now that D43 gives the world a real
+  speed floor).
+
+  **Phase 10b-3b-ii and Phase 10 overall are closed.**
 
 ### Phase 11+ — The actual project, indefinitely
 

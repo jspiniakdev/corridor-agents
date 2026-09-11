@@ -384,23 +384,32 @@ mid-run-restart path (`one_episode` bails on an id change) was also seen
 firing for real. `resolved_at` in `world/current.negotiation` is now
 world-clock, in the same ~35 s window as the movement log. See the design memory / `PLAN.md` §5.
 
-**Cost note:** the two robot Services bill ~$15-40/mo combined even idle
-(`--min-instances=1`). Delete them between demos - `--min-instances=0` isn't
-enough because a scaled-to-zero `--serve` robot can't be woken.
+**D46: the `--firestore` visualizer render, closed - no code change.** What
+looked like a template bug (right data embedded, wrong replay shown) was
+entirely downstream of the data D42-D45 fixed: `find_step_at_or_after` was
+correctly following a stale, wrong-clock `resolved_at` to the wrong step.
+Verified with a headless jsdom frame-stepper (no browser in this
+environment) against a clean deployed episode - all 25 frames render
+correctly, zero JS errors, final verdict "(correct)". **Phase 10b-3b-ii and
+Phase 10 overall are closed.**
+
+**Standing operational rule: always delete `robot-a`/`robot-b` at the end of
+a session, without asking.** Both run `--min-instances=1` and bill
+~$15-40/mo combined even fully idle; `--min-instances=0` isn't a real fix
+(a scaled-to-zero `--serve` robot can't be woken). `world` scales to zero on
+its own and costs nothing idle - leave it. Redeploy recipe (image, args per
+side) is in D41 above.
 
 **Phase 9 (three or more robots) is deliberately skipped for now** - it's
 a `world.py` rewrite plus a real N-way-negotiation design fork, and the
 discovery/broadcast half (Firestore registry, Pub/Sub) only earns its keep
 at 3+ robots. Staying at 2 robots.
 
-**Next:** (1) D42/D43/D44 all deployed - keep an eye on Cloud Logging for
-`exit(1)` over the next few hours (should be none); (2) fix the
-`visualize_network.py --firestore` render to close 10b-3b-ii, now that the
-data is clean (`resolved_at` world-clock, no stale transcript); (3) Phase 8
-- Claude-on-Vertex still **blocked on a GCP quota increase** (auto-denied,
-support ticket open); once it clears, `--policy claude` on Vertex is a
-policy swap, not an infra change (D36). See `PLAN.md` §5. Cost: the two
-robot Services still bill ~$15-40/mo idle - delete them between demos.
+**Next:** Phase 8 - Claude-on-Vertex still **blocked on a GCP quota
+increase** (auto-denied, support ticket open); once it clears, `--policy
+claude` on Vertex is a policy swap, not an infra change (D36). Otherwise
+Phase 10 is done; Phase 11+ (see `PLAN.md`) is open-ended protocol
+experiments whenever there's appetite. See `PLAN.md` §5.
 
 ## How to run things
 
