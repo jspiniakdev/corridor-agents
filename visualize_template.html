@@ -166,7 +166,7 @@
      chat log itself scrolls instead of growing the panel when a negotiation
      runs long. */
   #dialogue-panel {
-    height: 130px;
+    height: 260px;
     display: flex;
     flex-direction: column;
   }
@@ -183,18 +183,23 @@
     margin-bottom: 0.75rem;
   }
 
+  /* No robot name on each line - which robot is speaking is carried by
+     font color alone (matching marker-a/marker-b's colors) plus the
+     existing left/right alignment, rather than repeating "Robot A"/
+     "Robot B" on every message. */
   .message {
     max-width: 80%;
-    padding: 0.5rem 0.75rem;
+    padding: 0.4rem 0.65rem;
     border-radius: 8px;
     font-size: 0.9rem;
     flex: none;
+    background: #f3f4f6;
   }
 
-  .message.speaker-a { background: #dbeafe; align-self: flex-start; }
-  .message.speaker-b { background: #fef3c7; align-self: flex-end; }
+  .message.speaker-a { align-self: flex-start; color: #2563eb; }
+  .message.speaker-b { align-self: flex-end; color: #d97706; }
 
-  .message .speaker-name { font-weight: bold; font-size: 0.8rem; display: block; }
+  .message .message-intent { font-weight: bold; font-size: 0.7rem; text-transform: uppercase; opacity: 0.8; display: block; }
 
   #priority-banner {
     flex: none;
@@ -427,10 +432,12 @@ function buildFrames() {
         });
       }
 
-      // one frame showing the decided priority, before anyone moves
-      const decisionText = negotiation.agreed
-        ? "Priority: " + negotiation.agreed_on
-        : "DEADLOCK - no agreement";
+      // one frame showing the decided priority, before anyone moves. No
+      // "Priority: X" text on agreement - #current-priority above the grid
+      // already shows that (currentPriority is set right below). A
+      // deadlock has nowhere else to show up, though - the grid would just
+      // read "undecided" forever - so that case still gets a banner.
+      const decisionText = negotiation.agreed ? null : "DEADLOCK - no agreement";
       currentPriority = entry.priority;
       built.push({
         tickLabel: STEP_WORD + " " + step + " - negotiating" + timeSuffix(elapsedMs),
@@ -563,12 +570,14 @@ function renderVerdict(frame) {
 function appendChatBubble(message) {
   const bubble = document.createElement("div");
   const isA = message.speaker === EPISODE_DATA.robots.a.name;
+  // Which robot is speaking is carried by color (matches marker-a/marker-b)
+  // and side (A left-aligned, B right-aligned) - no name repeated per line.
   bubble.className = "message " + (isA ? "speaker-a" : "speaker-b");
 
-  const speakerLabel = document.createElement("span");
-  speakerLabel.className = "speaker-name";
-  speakerLabel.textContent = message.speaker + " (" + message.intent + ")";
-  bubble.appendChild(speakerLabel);
+  const intentLabel = document.createElement("span");
+  intentLabel.className = "message-intent";
+  intentLabel.textContent = message.intent;
+  bubble.appendChild(intentLabel);
 
   const text = document.createElement("span");
   text.textContent = message.text;
