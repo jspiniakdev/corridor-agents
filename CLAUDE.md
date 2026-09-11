@@ -393,6 +393,26 @@ environment) against a clean deployed episode - all 25 frames render
 correctly, zero JS errors, final verdict "(correct)". **Phase 10b-3b-ii and
 Phase 10 overall are closed.**
 
+**D47: the grid lengthened, corridor moved right of center.**
+`MAX_POSITION` 8→14; `CORRIDOR_ZONE` {3,4,5}→{7,8,9}, `A_BOUNDARY`=6,
+`B_BOUNDARY`=10. A first attempt at the full +6 shift ({9,10,11}) silently
+broke negotiation - B's boundary ended up only 2 steps from `B_START`,
+so B always reached first, sensed nothing (A was outside `SENSOR_RANGE`=6),
+and sailed through alone, exactly the D21 failure mode. {7,8,9} is the
+rightmost position that keeps both boundaries a comparable number of
+steps from their starts and still produces a real standoff - confirmed
+live: `dying_battery_vs_fragile_cargo` redeployed (`world` rev 00006,
+`robot-a` rev 00002, `robot-b` rev 00002, same shared image, unchanged
+startup args), a real 2-message Gemini-2.5-pro negotiation (A: battery
+critical, proceeds; B: yields), `a=14 b=1`, `priority: Robot A`, replay
+rendered clean via the jsdom frame-stepper (38 frames, zero JS errors).
+152 tests (same count, recalculated for the new geometry). Caveat: unlike
+the old grid, no corridor position on the longer grid restores the old
+"a robot at its boundary always senses the other" guarantee in both
+directions - `{7,8,9}` is verified for this scenario under normal
+same-time-start polling, not a structural guarantee. See `DECISIONS.md`
+D47.
+
 **Standing operational rule: always delete `robot-a`/`robot-b` at the end of
 a session, without asking.** Both run `--min-instances=1` and bill
 ~$15-40/mo combined even fully idle; `--min-instances=0` isn't a real fix

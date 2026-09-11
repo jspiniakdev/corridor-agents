@@ -26,13 +26,13 @@ S = SCENARIOS[0]
 
 
 def test_distance_to_entrance_for_robot_a():
-    assert distance_to_entrance(position=1, direction=1, corridor_zone=CORRIDOR_ZONE) == 2
-    assert distance_to_entrance(position=2, direction=1, corridor_zone=CORRIDOR_ZONE) == 1
+    assert distance_to_entrance(position=5, direction=1, corridor_zone=CORRIDOR_ZONE) == 2
+    assert distance_to_entrance(position=6, direction=1, corridor_zone=CORRIDOR_ZONE) == 1
 
 
 def test_distance_to_entrance_for_robot_b():
-    assert distance_to_entrance(position=8, direction=-1, corridor_zone=CORRIDOR_ZONE) == 3
-    assert distance_to_entrance(position=6, direction=-1, corridor_zone=CORRIDOR_ZONE) == 1
+    assert distance_to_entrance(position=11, direction=-1, corridor_zone=CORRIDOR_ZONE) == 2
+    assert distance_to_entrance(position=10, direction=-1, corridor_zone=CORRIDOR_ZONE) == 1
 
 
 def test_sensor_fact_present_within_range():
@@ -41,9 +41,10 @@ def test_sensor_fact_present_within_range():
 
 
 def test_sensor_fact_includes_the_other_robots_distance_to_its_entrance():
-    # the exact standoff from the reviewed episode: A at 2, B at 6 - both
-    # one cell from the corridor. The LLM had claimed B was 4 cells away.
-    text = compose_observation(2, 1, 6, CORRIDOR_ZONE, SENSOR_RANGE, "private")
+    # the exact standoff from the reviewed episode: A at its boundary, B at
+    # its boundary - both one cell from the corridor. The LLM had claimed B
+    # was several cells farther away than that.
+    text = compose_observation(6, 1, 10, CORRIDOR_ZONE, SENSOR_RANGE, "private")
     assert "You are 1 cell(s) from the corridor entrance." in text
     assert "It is 1 cell(s) from the corridor entrance on its side." in text
 

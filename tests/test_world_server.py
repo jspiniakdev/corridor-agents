@@ -29,9 +29,9 @@ def _state():
 def test_get_map_matches_world_constants():
     reset_state()
     result = ws.get_map()
-    assert result["corridor_zone"] == [3, 4, 5]
-    assert result["a_boundary"] == 2
-    assert result["b_boundary"] == 6
+    assert result["corridor_zone"] == [7, 8, 9]
+    assert result["a_boundary"] == 6
+    assert result["b_boundary"] == 10
 
 
 def test_get_observation_reflects_current_position():
@@ -39,7 +39,7 @@ def test_get_observation_reflects_current_position():
     obs = ws.get_observation("a")
     assert obs["position"] == 1
     assert obs["at_boundary"] is False
-    assert obs["sensed_other"] is False  # A=1, B=8, gap=7 > SENSOR_RANGE=6 (D25)
+    assert obs["sensed_other"] is False  # A=1, B=14, gap=13 > SENSOR_RANGE=6 (D25)
     assert obs["other_distance_to_boundary"] is None  # not sensed, so not knowable
 
 
@@ -54,8 +54,8 @@ def test_get_observation_senses_other_within_range():
 
 def test_get_observation_reports_other_distance_to_its_own_boundary():
     reset_state()
-    _state().a.position = 1
-    _state().b.position = 5  # sensed (gap=4 <= 6), 1 step from its own boundary (6)
+    _state().a.position = 6  # A at its boundary
+    _state().b.position = 9  # sensed (gap=3 <= 6), 1 step from its own boundary (10)
     obs = ws.get_observation("a")
     assert obs["sensed_other"] is True
     assert obs["other_distance_to_boundary"] == 1
@@ -63,18 +63,18 @@ def test_get_observation_reports_other_distance_to_its_own_boundary():
 
 def test_get_observation_reports_other_distance_to_the_corridor_entrance():
     reset_state()
-    _state().a.position = 2
-    _state().b.position = 6  # the reviewed standoff - both one cell from the corridor
+    _state().a.position = 6
+    _state().b.position = 10  # the reviewed standoff - both one cell from the corridor
     a_obs = ws.get_observation("a")
     assert a_obs["distance_to_entrance"] == 1
-    assert a_obs["other_distance_to_entrance"] == 1  # B at 6 -> entrance 5
+    assert a_obs["other_distance_to_entrance"] == 1  # B at 10 -> entrance 9
     b_obs = ws.get_observation("b")
     assert b_obs["distance_to_entrance"] == 1
-    assert b_obs["other_distance_to_entrance"] == 1  # A at 2 -> entrance 3
+    assert b_obs["other_distance_to_entrance"] == 1  # A at 6 -> entrance 7
 
 
 def test_get_observation_other_distance_to_entrance_none_when_not_sensed():
-    reset_state()  # A=1, B=8, gap 7 > sensor 6
+    reset_state()  # A=1, B=14, gap 13 > sensor 6
     assert ws.get_observation("a")["other_distance_to_entrance"] is None
 
 
@@ -102,14 +102,14 @@ def test_propose_action_wait_never_changes_position():
 
 def test_propose_action_blocks_entry_while_the_other_robot_is_in_the_zone():
     reset_state()
-    _state().a.position = 4  # already inside the corridor zone
-    _state().b.position = 6  # at its boundary, about to try entering
+    _state().a.position = 8  # already inside the corridor zone
+    _state().b.position = 10  # at its boundary, about to try entering
 
     result = ws.propose_action("b", "move")
 
     assert result["accepted"] is False
-    assert result["actual_position"] == 6  # held at the boundary
-    assert _state().b.position == 6
+    assert result["actual_position"] == 10  # held at the boundary
+    assert _state().b.position == 10
 
 
 def test_propose_action_only_moves_the_requesting_side():

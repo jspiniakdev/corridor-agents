@@ -18,6 +18,7 @@ from world import (  # noqa: E402
     B_START,
     B_TARGET,
     CORRIDOR_ZONE,
+    SENSOR_RANGE,
     RobotState,
     WorldState,
     executive_decide,
@@ -104,12 +105,13 @@ def test_never_yield_standoff_deadlocks_and_negotiate_is_called_exactly_once():
 def test_no_standoff_means_no_negotiation_at_all():
     """When the other robot is genuinely out of sensor range, the
     deliberative layer must stay completely silent. b_position=100 is
-    outside the real grid on purpose (MAX_POSITION, D21) - within the real
-    grid, once A reaches its boundary, B is always within SENSOR_RANGE at
-    worst (the max possible gap from A's boundary is exactly
-    SENSOR_RANGE), so this exercises the "can't sense" branch directly
-    rather than relying on a scenario that can't actually occur in a real
-    episode."""
+    outside the real grid on purpose (MAX_POSITION, D21) - a robot at its
+    own boundary with nothing sensed nearby must stay silent, whatever the
+    grid size (D47: on today's longer grid, reaching your own boundary no
+    longer guarantees the other is within SENSOR_RANGE - that guarantee
+    was specific to the old, shorter grid - so this now also covers a gap
+    that really can occur if the other robot hasn't started closing in
+    yet)."""
     state = make_state(a_position=A_BOUNDARY, b_position=100)
     executive_decide(state, deliberate=True, max_negotiation_turns=6)
     assert state.negotiation_outcome is None
@@ -118,7 +120,7 @@ def test_no_standoff_means_no_negotiation_at_all():
 def test_at_boundary_and_other_not_yet_arrived_but_sensed_still_negotiates():
     """The actual new behavior: A doesn't need to wait for B to physically
     reach its own boundary - sensing it is enough to start negotiating."""
-    state = make_state(a_position=A_BOUNDARY, b_position=B_START)  # gap is exactly SENSOR_RANGE
+    state = make_state(a_position=A_BOUNDARY, b_position=A_BOUNDARY + SENSOR_RANGE)  # gap is exactly SENSOR_RANGE
     executive_decide(state, deliberate=True, max_negotiation_turns=6)
     assert state.negotiation_outcome is not None
 

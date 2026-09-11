@@ -32,21 +32,21 @@ def make_state(a_position, b_position):
 
 
 def test_lone_entrant_is_allowed_through():
-    state = make_state(a_position=2, b_position=8)  # B is far away
+    state = make_state(a_position=2, b_position=14)  # B is far away
     a_action, b_action = reactive_filter(state, "move", "move")
     assert a_action == "move"
     assert b_action == "move"
 
 
 def test_second_entrant_is_blocked_while_the_zone_is_occupied():
-    state = make_state(a_position=3, b_position=6)  # A is already in the zone
+    state = make_state(a_position=8, b_position=10)  # A is already in the zone
     a_action, b_action = reactive_filter(state, "move", "move")
     assert a_action == "move"  # A may continue through
     assert b_action == "wait"  # B must not enter while A is inside
 
 
 def test_simultaneous_entry_attempt_blocks_both():
-    state = make_state(a_position=2, b_position=6)  # neither is in the zone yet
+    state = make_state(a_position=6, b_position=10)  # neither is in the zone yet
     a_action, b_action = reactive_filter(state, "move", "move")
     assert a_action == "wait"
     assert b_action == "wait"
@@ -59,7 +59,7 @@ def test_swap_through_the_bridge_is_blocked():
     check missed it) - passing them through each other on the one-lane
     bridge. A must wait; B's exit isn't blocked, since leaving the bridge
     doesn't need to check anything."""
-    state = make_state(a_position=2, b_position=3)  # A about to enter, B about to exit
+    state = make_state(a_position=6, b_position=7)  # A about to enter, B about to exit
     a_action, b_action = reactive_filter(state, "move", "move")
     assert a_action == "wait"
     assert b_action == "move"

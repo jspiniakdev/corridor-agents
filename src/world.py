@@ -13,11 +13,24 @@ wait if it doesn't yet have permission to enter.
 The grid was briefly widened and made asymmetric (D21) to force a real,
 live-observable case Phase 3's original symmetric grid could never
 naturally produce - A reaching its boundary long before B was anywhere
-close. That experiment is done; the grid is back to its original
-symmetric size (D25), now paired with a physically-motivated SENSOR_RANGE
-that doesn't need the asymmetric grid to make the same point: a robot
-only senses the other - and only negotiates - when there's a real
-collision risk, not from anywhere on the map.
+close. That experiment is done; the grid was back to its original
+symmetric size for a while (D25), paired with a physically-motivated
+SENSOR_RANGE that doesn't need an asymmetric grid to make the same
+point: a robot only senses the other - and only negotiates - when
+there's a real collision risk, not from anywhere on the map.
+
+The grid was lengthened again and the corridor moved right of center
+(D47) - not a full symmetric shift, and not an experiment meant to be
+reverted like D21. A first attempt shifted the zone by the same +6 the
+grid grew by ({9,10,11}), which looked reasonable but silently broke
+the negotiation for the project's own go-to standoff case: B's boundary
+ended up only 2 steps from B_START while A's was 7 steps from A_START,
+so B always reaches, senses nothing (A is nowhere near SENSOR_RANGE=6
+yet), and sails through alone - zero negotiation, exactly the failure
+mode D21 was reverted for. {7,8,9} is the rightmost zone that still
+keeps both boundaries within a comparable number of steps of their
+starts (5 and 4) so a real standoff still happens - confirmed live
+against `dying_battery_vs_fragile_cargo`.
 """
 
 from __future__ import annotations
@@ -28,18 +41,18 @@ from negotiation import POLICIES, Robot, negotiate
 from observation import compose_observation
 
 MIN_POSITION = 1
-MAX_POSITION = 8
+MAX_POSITION = 14
 
-CORRIDOR_ZONE = {3, 4, 5}
+CORRIDOR_ZONE = {7, 8, 9}
 
 A_START = MIN_POSITION
 A_TARGET = MAX_POSITION
-A_BOUNDARY = 2
+A_BOUNDARY = 6
 A_DIRECTION = 1
 
 B_START = MAX_POSITION
 B_TARGET = MIN_POSITION
-B_BOUNDARY = 6
+B_BOUNDARY = 10
 B_DIRECTION = -1
 
 # Physically motivated, not tuned to grid size (D25, reversing D21's

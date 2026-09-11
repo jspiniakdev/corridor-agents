@@ -8,16 +8,27 @@ import sys
 sys.path.insert(0, ".")
 sys.path.insert(0, "src")
 
-from world import A_START, B_START, RobotState, WorldState, apply, reactive_filter  # noqa: E402
+from world import (  # noqa: E402
+    A_BOUNDARY,
+    A_START,
+    A_TARGET,
+    B_BOUNDARY,
+    B_START,
+    B_TARGET,
+    RobotState,
+    WorldState,
+    apply,
+    reactive_filter,
+)
 
 from world_store import InMemoryWorldStore, _resolve, grid_facts, state_from_positions  # noqa: E402
 
 
 def test_state_from_positions_rebuilds_a_usable_worldstate():
-    state = state_from_positions(3, 5)
-    assert (state.a.position, state.b.position) == (3, 5)
+    state = state_from_positions(7, 9)
+    assert (state.a.position, state.b.position) == (7, 9)
     assert state.a.direction == 1 and state.b.direction == -1
-    assert state.a.in_zone is True  # 3 is in CORRIDOR_ZONE {3,4,5}
+    assert state.a.in_zone is True  # 7 is in CORRIDOR_ZONE {7,8,9}
     assert state.log == []
 
 
@@ -37,11 +48,11 @@ def test_resolve_applies_a_safe_move_and_returns_the_log_entry():
 
 
 def test_resolve_downgrades_an_unsafe_move_to_wait():
-    state = state_from_positions(4, 6)  # A already in the zone, B at its boundary
+    state = state_from_positions(8, 10)  # A already in the zone, B at its boundary
     entry = _resolve(state, "b", "move")
     assert entry["action"] == "move"
     assert entry["resolved"] == "wait"
-    assert state.b.position == 6  # held
+    assert state.b.position == 10  # held
 
 
 def test_inmemory_store_matches_raw_world_py_over_a_sequence():
@@ -51,8 +62,8 @@ def test_inmemory_store_matches_raw_world_py_over_a_sequence():
     orthogonal to the safety semantics this asserts."""
     store = InMemoryWorldStore(min_move_interval=0)
     ref = WorldState(
-        RobotState(store.get_state().a.robot, A_START, 1, 2, 8),
-        RobotState(store.get_state().b.robot, B_START, -1, 6, 1),
+        RobotState(store.get_state().a.robot, A_START, 1, A_BOUNDARY, A_TARGET),
+        RobotState(store.get_state().b.robot, B_START, -1, B_BOUNDARY, B_TARGET),
     )
     moves = [("a", "move"), ("b", "move"), ("a", "move"), ("b", "wait"), ("a", "move")]
     for side, action in moves:
@@ -89,7 +100,7 @@ def test_grid_facts_has_the_keys_world_servers_get_map_promised():
         "a_target",
         "b_target",
     }
-    assert facts["corridor_zone"] == [3, 4, 5]
+    assert facts["corridor_zone"] == [7, 8, 9]
 
 
 def test_inmemory_store_log_and_reset():

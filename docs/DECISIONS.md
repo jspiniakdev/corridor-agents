@@ -1916,3 +1916,64 @@ even notice. Not implemented as a permanent test yet - a candidate for
 `tests/test_visualize_network.py` if the template gets touched again.
 
 **Phase 10b-3b-ii, and Phase 10 overall, are closed.**
+
+## D47 — the grid, lengthened and the corridor moved right of center
+
+Requested directly: a longer stage for the same negotiation, with the
+corridor visibly moved from its old left-of-center spot. `MIN_POSITION`
+stays 1; `MAX_POSITION` goes 8→14 (+6, the full length requested).
+
+**First attempt broke the negotiation.** Shifting `CORRIDOR_ZONE` by the
+same +6 the grid grew by ({3,4,5}→{9,10,11}) looked like the obvious
+matching move, but it made `B_BOUNDARY` only 2 steps from `B_START`
+while `A_BOUNDARY` stayed 7 steps from `A_START`. Run against the
+project's own go-to standoff (`dying_battery_vs_fragile_cargo`), B
+reached its boundary almost immediately, sensed nothing (A was nowhere
+near `SENSOR_RANGE`=6 yet), and sailed through the zone alone -
+`priority: Robot B`, zero negotiation, zero LLM calls. This is exactly
+the failure mode D21 was reverted for (D25/D26): a corridor position
+that makes one robot's approach much shorter than the other's turns a
+negotiation demo into a coin-flip FCFS race. Confirmed empirically, not
+assumed - `world.run_episode` against the real scenario, both before
+and after.
+
+**The fix: `CORRIDOR_ZONE` → `{7,8,9}`, `A_BOUNDARY`=6, `B_BOUNDARY`=10.**
+Swept `{6,7,8}` through `{9,10,11}`; `{7,8,9}` is the rightmost position
+where both boundaries stay within a comparable number of steps of their
+starts (5 for A, 4 for B) and the standoff still fires - verified live,
+`negotiation_tick=4` locally and a real 2-message Gemini-2.5-pro
+exchange deployed (A: battery critical, proceeds; B: acknowledges,
+yields; `a=14 b=1`, `priority: Robot A`). It's a smaller rightward shift
+than the +6 first tried, but it's still unambiguously right of the new
+grid's center (8 vs. the true center 7.5) where the old zone sat left of
+its grid's center (4 vs. 4.5) - "moved right" without breaking the
+mechanism that makes the demo a real negotiation.
+
+**Honest caveat, not fixed further:** unlike the original 1-8 grid,
+where `A_BOUNDARY`→`B_START` was exactly `SENSOR_RANGE` (6), guaranteeing
+a robot at its own boundary always senses the other regardless of the
+other's timing, no corridor position on the 1-14 grid can restore that
+guarantee for *both* directions at once - the grid is simply too long
+relative to a `SENSOR_RANGE` deliberately decoupled from grid size (D25).
+`{7,8,9}` works for `dying_battery_vs_fragile_cargo` under normal
+same-time-start polling, not as a structural guarantee for every
+scenario/timing. `world_eval.py`'s free-case sweep stats (completion
+90%, negotiated 90%) are unchanged from the pre-D47 baseline, so this
+isn't a regression for the batch measurement path - just a weaker
+worst-case bound than the old grid happened to have. Would revisit if a
+future scenario shows the gap in practice (a robot proceeding solo when
+a real standoff was intended).
+
+**Would change our mind:** a scenario where `{7,8,9}` also sails through
+solo - shrink the gap further, or reconsider whether `SENSOR_RANGE`
+should scale with grid length after all (D25's "not tuned to grid size"
+call was made at grid length 8; length 14 is the first real test of it).
+
+Tests updated for the new geometry: `test_world.py`, `test_reactive.py`,
+`test_world_store.py`, `test_world_server.py`, `test_observation.py`,
+`test_world_eval.py` (152 passing, same count as before - no coverage
+lost, positions/expected values recalculated for the new grid). Deployed:
+new image built and pushed, `world`/`robot-a`/`robot-b` all redeployed
+with unchanged startup args (only the image changed) - `robot-a`/`robot-b`
+don't import `world.py` directly, only `world_server.py` needed the new
+constants, but all three were rebuilt from the same image for consistency.

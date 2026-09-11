@@ -25,7 +25,7 @@ def test_fcfs_row_is_never_negotiated():
     row = run_world_episode(scenario, "stubborn", "stubborn", deliberate=False, repeat=0)
     assert row["negotiated"] is False
     assert row["completed"] is True
-    assert row["priority"] == "Robot A"  # FCFS: A structurally reaches its boundary first
+    assert row["priority"] == "Robot B"  # FCFS: B structurally reaches its boundary first (D47: B_BOUNDARY is closer to B_START than A_BOUNDARY is to A_START)
 
 
 def test_read_cases_finds_the_expected_row_counts():
