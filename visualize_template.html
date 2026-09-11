@@ -101,6 +101,33 @@
     border-left: 2px dashed #9ca3af;
   }
 
+  #position-ruler {
+    position: relative;
+    height: 22px;
+    margin: 0.4rem 1rem 0 1rem;
+  }
+
+  .position-tick {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+    text-align: center;
+    font-size: 0.7rem;
+    color: #9ca3af;
+  }
+
+  .position-tick::before {
+    content: "";
+    display: block;
+    width: 0;
+    height: 5px;
+    margin: 0 auto 2px auto;
+    border-left: 1px solid #d1d5db;
+  }
+
+  .position-tick.in-zone { color: #b91c1c; font-weight: bold; }
+  .position-tick.is-boundary { color: #1f2937; font-weight: bold; }
+
   .robot-marker {
     position: absolute;
     width: 34px;
@@ -206,6 +233,12 @@
   </div>
 </section>
 
+<section id="dialogue-panel" hidden>
+  <h2>Negotiation</h2>
+  <div id="chat-log"></div>
+  <div id="priority-banner"></div>
+</section>
+
 <section id="track-wrapper">
   <div id="status-line">
     <span id="tick-label">tick -</span>
@@ -222,13 +255,8 @@
     <div class="robot-marker" id="marker-a">A</div>
     <div class="robot-marker" id="marker-b">B</div>
   </div>
+  <div id="position-ruler"></div>
   <div id="action-log"></div>
-</section>
-
-<section id="dialogue-panel" hidden>
-  <h2>Negotiation</h2>
-  <div id="chat-log"></div>
-  <div id="priority-banner"></div>
 </section>
 
 <section id="verdict-panel" hidden>
@@ -295,6 +323,17 @@ function stepDelay(entry) {
   return Math.min(Math.max(entry.elapsed_ms, MIN_STEP_DELAY_MS), MAX_STEP_DELAY_MS);
 }
 
+// Real elapsed time since the episode's first logged event, cumulative
+// across entries (not the per-entry delta stepDelay() uses for playback
+// pacing). Shown alongside the step number so it's visible that real time
+// is passing even on the many steps where neither robot's marker moves -
+// most steps are one side polling "wait" while the other is mid-negotiation
+// or already at its boundary, and a step counter alone reads as "nothing
+// happened" on those.
+function timeSuffix(elapsedMs) {
+  return " (t+" + (elapsedMs / 1000).toFixed(1) + "s)";
+}
+
 function buildFrames() {
   const built = [];
   let aPosition = EPISODE_DATA.robots.a.start_position;
@@ -302,7 +341,7 @@ function buildFrames() {
   let currentPriority = null;   // undecided until a log entry resolves it
 
   built.push({
-    tickLabel: STEP_WORD + " -",
+    tickLabel: STEP_WORD + " -" + timeSuffix(0),
     aPosition: aPosition,
     bPosition: bPosition,
     aAction: "",
@@ -314,9 +353,11 @@ function buildFrames() {
     verdictVisible: false,
     delayMs: TICK_DELAY_MS,
   });
+  let elapsedMs = 0;
 
   EPISODE_DATA.log.forEach(function (entry) {
     const step = entryStep(entry);
+    elapsedMs += entry.elapsed_ms || 0;
     const negotiation = EPISODE_DATA.negotiation;
     const isNegotiationTick = negotiation !== null && entryStep(negotiation) === step;
 
@@ -330,7 +371,7 @@ function buildFrames() {
       const caller = negotiation.messages.length > 0 ? negotiation.messages[0].speaker : "a robot";
       const callee = caller === "Robot A" ? "Robot B" : "Robot A";
       built.push({
-        tickLabel: STEP_WORD + " " + step + " - establishing comms",
+        tickLabel: STEP_WORD + " " + step + " - establishing comms" + timeSuffix(elapsedMs),
         aPosition: aPosition,
         bPosition: bPosition,
         aAction: "",
@@ -351,7 +392,7 @@ function buildFrames() {
       // and priority is still undecided, while the robots are still talking
       for (let shown = 1; shown <= messages.length; shown++) {
         built.push({
-          tickLabel: STEP_WORD + " " + step + " - negotiating",
+          tickLabel: STEP_WORD + " " + step + " - negotiating" + timeSuffix(elapsedMs),
           aPosition: aPosition,
           bPosition: bPosition,
           aAction: "",
@@ -371,7 +412,7 @@ function buildFrames() {
         : "DEADLOCK - no agreement";
       currentPriority = entry.priority;
       built.push({
-        tickLabel: STEP_WORD + " " + step + " - negotiating",
+        tickLabel: STEP_WORD + " " + step + " - negotiating" + timeSuffix(elapsedMs),
         aPosition: aPosition,
         bPosition: bPosition,
         aAction: "",
@@ -399,7 +440,7 @@ function buildFrames() {
         : "";
 
     built.push({
-      tickLabel: STEP_WORD + " " + step + idleSuffix,
+      tickLabel: STEP_WORD + " " + step + idleSuffix + timeSuffix(elapsedMs),
       aPosition: aPosition,
       bPosition: bPosition,
       aAction: entry.a_action,
@@ -413,12 +454,12 @@ function buildFrames() {
     });
   });
 
-  built.push(buildVerdictFrame(aPosition, bPosition, currentPriority));
+  built.push(buildVerdictFrame(aPosition, bPosition, currentPriority, elapsedMs));
 
   return built;
 }
 
-function buildVerdictFrame(aPosition, bPosition, currentPriority) {
+function buildVerdictFrame(aPosition, bPosition, currentPriority, elapsedMs) {
   const lines = [];
   lines.push(EPISODE_DATA.completed ? "episode completed" : "did not complete");
   lines.push("priority: " + (EPISODE_DATA.priority || "none decided"));
@@ -435,7 +476,7 @@ function buildVerdictFrame(aPosition, bPosition, currentPriority) {
   }
 
   return {
-    tickLabel: "done",
+    tickLabel: "done" + timeSuffix(elapsedMs),
     aPosition: aPosition,
     bPosition: bPosition,
     aAction: "",
@@ -526,6 +567,25 @@ function placeMarker(elementId, position, ownLanePercent) {
   marker.style.top = (isInZone(position) ? LANE_SHARED_PERCENT : ownLanePercent) + "%";
 }
 
+// A numbered ruler under the track - min_position..max_position - so a
+// viewer can read exact positions instead of judging them by eye against
+// an unmarked bar. Corridor-zone numbers pick up the same red the zone
+// overlay uses; boundary numbers (D17's real "where negotiation triggers"
+// positions) are bolded so they read as landmarks, not just more numbers.
+function buildPositionRuler(grid) {
+  const ruler = document.getElementById("position-ruler");
+  ruler.innerHTML = "";
+  for (let position = grid.min_position; position <= grid.max_position; position++) {
+    const tick = document.createElement("div");
+    tick.className = "position-tick";
+    if (grid.corridor_zone.includes(position)) tick.className += " in-zone";
+    if (position === grid.a_boundary || position === grid.b_boundary) tick.className += " is-boundary";
+    tick.style.left = positionToPercent(position) + "%";
+    tick.textContent = position;
+    ruler.appendChild(tick);
+  }
+}
+
 function goToFrame(index) {
   frameIndex = Math.max(0, Math.min(index, frames.length - 1));
   render(frames[frameIndex]);
@@ -597,6 +657,8 @@ function init() {
 
   document.getElementById("a-boundary-marker").style.left = positionToPercent(grid.a_boundary) + "%";
   document.getElementById("b-boundary-marker").style.left = positionToPercent(grid.b_boundary) + "%";
+
+  buildPositionRuler(grid);
 
   frames = buildFrames();
   stopPlaying();
