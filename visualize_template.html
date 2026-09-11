@@ -157,7 +157,23 @@
     margin-bottom: 1.5rem;
   }
 
+  /* Fixed height, always in the layout (not toggled with [hidden]) - so the
+     track below doesn't jump up and down as a negotiation opens, plays out,
+     and resolves. Empty (heading only) before/without a negotiation; the
+     chat log itself scrolls instead of growing the panel when a negotiation
+     runs long. */
+  #dialogue-panel {
+    height: 260px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  #dialogue-panel h2 { flex: none; }
+
   #chat-log {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
@@ -169,6 +185,7 @@
     padding: 0.5rem 0.75rem;
     border-radius: 8px;
     font-size: 0.9rem;
+    flex: none;
   }
 
   .message.speaker-a { background: #dbeafe; align-self: flex-start; }
@@ -177,7 +194,9 @@
   .message .speaker-name { font-weight: bold; font-size: 0.8rem; display: block; }
 
   #priority-banner {
+    flex: none;
     font-weight: bold;
+    min-height: 1.2em;
   }
 
   #verdict-text div { margin-bottom: 0.25rem; }
@@ -233,7 +252,7 @@
   </div>
 </section>
 
-<section id="dialogue-panel" hidden>
+<section id="dialogue-panel">
   <h2>Negotiation</h2>
   <div id="chat-log"></div>
   <div id="priority-banner"></div>
@@ -331,7 +350,7 @@ function stepDelay(entry) {
 // or already at its boundary, and a step counter alone reads as "nothing
 // happened" on those.
 function timeSuffix(elapsedMs) {
-  return " (t+" + (elapsedMs / 1000).toFixed(1) + "s)";
+  return " (" + (elapsedMs / 1000).toFixed(1) + "s)";
 }
 
 function buildFrames() {
@@ -506,10 +525,12 @@ function render(frame) {
   document.getElementById("action-log").textContent =
     (frame.aAction || frame.bAction) ? "A: " + describeAction(frame.aAction) + "   B: " + describeAction(frame.bAction) : "";
 
-  document.getElementById("dialogue-panel").hidden = !frame.dialogueVisible;
+  // #dialogue-panel is always in the layout now (fixed height, CSS) - just
+  // fill it with whatever this frame has, empty before/without a negotiation.
   const chatLog = document.getElementById("chat-log");
   chatLog.innerHTML = "";
   frame.chatMessages.forEach(appendChatBubble);
+  chatLog.scrollTop = chatLog.scrollHeight;  // keep the latest message in view once it overflows
   document.getElementById("priority-banner").textContent = frame.priorityText || "";
 
   document.getElementById("verdict-panel").hidden = !frame.verdictVisible;
