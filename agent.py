@@ -39,7 +39,7 @@ from wire import history_to_list, message_from_dict, message_to_dict  # noqa: E4
 
 from agent_executor import NegotiationExecutor  # noqa: E402
 
-POLL_INTERVAL_SECONDS = 1.0  # D30: how often a robot checks in with the world - governs movement, waiting, and negotiation-trigger cadence uniformly, not a separate "how long does moving take" model. Slept BEFORE each check-in (top of run_robot()'s loop), not after - so the first check-in is paced too, not a free instant action exempt from the interval. D43: this is a self-imposed politeness interval; the *hard* floor on movement speed is now the world's (world_store.MIN_MOVE_INTERVAL_SECONDS), which a robot can't poll its way past.
+POLL_INTERVAL_SECONDS = 0.4  # how often a robot checks in with the world - governs waiting and negotiation-trigger cadence; NOT the movement speed limit (that's the world's, world_store.MIN_MOVE_INTERVAL_SECONDS = 0.75, D43). Slept BEFORE each check-in (top of run_robot()'s loop), not after. Was 1.0 (D30); dropped once D43 gave the world a real floor - deployed each poll costs 2 authenticated MCP round-trips, so 0.4 shaves ~0.6s/cell off Cloud Run episodes. Locally (near-zero call latency) a robot now polls faster than the 0.75 floor, so consecutive same-side moves cost one "too_fast" bounce - benign, collapses to a wait in the replay, and effective pace settles at the world's 0.75, exactly what D43's floor is for.
 
 # WorldChannel resilience (D42 fix). The --auth OIDC token lasts ~1h; a --serve
 # robot runs for days, so the world channel builds a fresh client per call and

@@ -58,10 +58,11 @@ DOCUMENT = "current"
 
 # D43: the world's own hard floor on how fast a robot may advance - a "move"
 # accepted less than this after that side's previous accepted move is refused
-# ("too fast"), nothing applied. Kept below agent.py's POLL_INTERVAL_SECONDS
-# (1.0) so normal once-a-second polling is never throttled; it exists to absorb
-# a re-sent propose_action (a retried MCP call, a second Cloud Run instance) so a
-# network hiccup can't inject an extra cell of movement the robot never decided.
+# ("too fast"), nothing applied. This is THE movement speed limit (agent.py's
+# POLL_INTERVAL_SECONDS is just how often a robot checks in - 0.4, below this on
+# purpose). It also absorbs a re-sent propose_action (a retried MCP call, a
+# second Cloud Run instance) so a network hiccup can't inject a cell of movement
+# the robot never decided.
 MIN_MOVE_INTERVAL_SECONDS = 0.75
 
 
