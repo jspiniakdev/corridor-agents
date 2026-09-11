@@ -61,8 +61,26 @@
   #status-line {
     display: flex;
     justify-content: space-between;
+    align-items: baseline;
     font-weight: bold;
     margin-bottom: 0.5rem;
+  }
+
+  #step-info {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+  }
+
+  /* Fixed width, tabular digits, left-aligned - so the brackets always
+     start at the same x position and "step N" after them doesn't drift
+     left/right as the elapsed time gains a digit (9.9s -> 10.0s). */
+  #elapsed-time {
+    display: inline-block;
+    width: 5.5em;
+    font-variant-numeric: tabular-nums;
+    color: #6b7280;
+    font-weight: normal;
   }
 
   #current-priority {
@@ -267,7 +285,10 @@
 
 <section id="track-wrapper">
   <div id="status-line">
-    <span id="tick-label">tick -</span>
+    <span id="step-info">
+      <span id="elapsed-time">[ 0.0s ]</span>
+      <span id="tick-label">tick -</span>
+    </span>
     <span id="current-priority">priority: undecided</span>
   </div>
   <div id="track">
@@ -351,13 +372,15 @@ function stepDelay(entry) {
 
 // Real elapsed time since the episode's first logged event, cumulative
 // across entries (not the per-entry delta stepDelay() uses for playback
-// pacing). Shown alongside the step number so it's visible that real time
-// is passing even on the many steps where neither robot's marker moves -
-// most steps are one side polling "wait" while the other is mid-negotiation
-// or already at its boundary, and a step counter alone reads as "nothing
-// happened" on those.
-function timeSuffix(elapsedMs) {
-  return " (" + (elapsedMs / 1000).toFixed(1) + "s)";
+// pacing). Shown in its own fixed-width slot to the left of the step
+// label - not appended to it - so it's visible that real time is passing
+// even on the many steps where neither robot's marker moves (most steps
+// are one side polling "wait" while the other is mid-negotiation or
+// already at its boundary, and a step counter alone reads as "nothing
+// happened" on those), and so the step label doesn't drift left/right as
+// the number of digits in the time changes.
+function formatElapsed(elapsedMs) {
+  return "[ " + (elapsedMs / 1000).toFixed(1) + "s ]";
 }
 
 function buildFrames() {
@@ -367,7 +390,8 @@ function buildFrames() {
   let currentPriority = null;   // undecided until a log entry resolves it
 
   built.push({
-    tickLabel: STEP_WORD + " -" + timeSuffix(0),
+    tickLabel: STEP_WORD + " -",
+    elapsedMs: 0,
     aPosition: aPosition,
     bPosition: bPosition,
     aAction: "",
@@ -397,7 +421,8 @@ function buildFrames() {
       const caller = negotiation.messages.length > 0 ? negotiation.messages[0].speaker : "a robot";
       const callee = caller === "Robot A" ? "Robot B" : "Robot A";
       built.push({
-        tickLabel: STEP_WORD + " " + step + " - establishing comms" + timeSuffix(elapsedMs),
+        tickLabel: STEP_WORD + " " + step + " - establishing comms",
+        elapsedMs: elapsedMs,
         aPosition: aPosition,
         bPosition: bPosition,
         aAction: "",
@@ -418,7 +443,8 @@ function buildFrames() {
       // and priority is still undecided, while the robots are still talking
       for (let shown = 1; shown <= messages.length; shown++) {
         built.push({
-          tickLabel: STEP_WORD + " " + step + " - negotiating" + timeSuffix(elapsedMs),
+          tickLabel: STEP_WORD + " " + step + " - negotiating",
+          elapsedMs: elapsedMs,
           aPosition: aPosition,
           bPosition: bPosition,
           aAction: "",
@@ -440,7 +466,8 @@ function buildFrames() {
       const decisionText = negotiation.agreed ? null : "DEADLOCK - no agreement";
       currentPriority = entry.priority;
       built.push({
-        tickLabel: STEP_WORD + " " + step + " - negotiating" + timeSuffix(elapsedMs),
+        tickLabel: STEP_WORD + " " + step + " - negotiating",
+        elapsedMs: elapsedMs,
         aPosition: aPosition,
         bPosition: bPosition,
         aAction: "",
@@ -468,7 +495,8 @@ function buildFrames() {
         : "";
 
     built.push({
-      tickLabel: STEP_WORD + " " + step + idleSuffix + timeSuffix(elapsedMs),
+      tickLabel: STEP_WORD + " " + step + idleSuffix,
+      elapsedMs: elapsedMs,
       aPosition: aPosition,
       bPosition: bPosition,
       aAction: entry.a_action,
@@ -504,7 +532,8 @@ function buildVerdictFrame(aPosition, bPosition, currentPriority, elapsedMs) {
   }
 
   return {
-    tickLabel: "done" + timeSuffix(elapsedMs),
+    tickLabel: "done",
+    elapsedMs: elapsedMs,
     aPosition: aPosition,
     bPosition: bPosition,
     aAction: "",
@@ -524,6 +553,7 @@ function buildVerdictFrame(aPosition, bPosition, currentPriority, elapsedMs) {
 function render(frame) {
   placeMarker("marker-a", frame.aPosition, LANE_A_PERCENT);
   placeMarker("marker-b", frame.bPosition, LANE_B_PERCENT);
+  document.getElementById("elapsed-time").textContent = formatElapsed(frame.elapsedMs || 0);
   document.getElementById("tick-label").textContent = frame.tickLabel;
   document.getElementById("current-priority").textContent = "priority: " + (frame.currentPriority || "undecided");
   // a_action/b_action can be null (not "wait") for a side that hasn't
