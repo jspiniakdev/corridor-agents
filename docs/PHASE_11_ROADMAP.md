@@ -393,7 +393,11 @@ objectives" pressure gets most interesting.
    allowed?
 3. Tick budget / run length for a finite run, and the tick↔"second" mapping for
    the drain rate (`POLL_INTERVAL_SECONDS` is 1.0 today).
-4. The urgency distribution / scenario deck (2 robots for 11a, 3–8 for 11b).
+4. ~~The urgency distribution / scenario deck (2 robots for 11a, 3–8 for
+   11b).~~ **Settled for 11a** — `src/loop_scenarios.py`'s `duel` (18/5) and
+   `standoff` (20/20) match this doc exactly. `standoff`'s spawn corners
+   were never pinned down here; built reusing `duel`'s (TL/CW, TR/CCW) -
+   flagged as an assumption, see D48. `crowd` (11b) not built yet.
 5. ~~Exactly when the negotiation trigger fires relative to the boundary cell on
    a loop (today it's "at boundary + sensed"); confirm it still fires early
    enough given corridor lengths differ.~~ **Settled for the starter

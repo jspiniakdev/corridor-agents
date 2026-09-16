@@ -2088,3 +2088,18 @@ comparing `survival_result`'s numbers is free to call the longer-lived one
 "the result," but `loop_world.py` itself only reports, it doesn't judge.
 This matches `PLAN.md` §9's own framing: survival, not victory, is Phase
 11's metric.
+
+**Config format + `standoff`'s unstated spawn corners (11a step 3):**
+`src/loop_scenarios.py` implements PHASE_11_ROADMAP.md's config sketch as
+plain frozen dataclasses (`RobotSpawn`, `LoopConfig`), not literal YAML -
+consistent with `scenarios.py`'s own pattern and "prefer boring stdlib
+code, new dependencies need a reason" (`CLAUDE.md`); the roadmap's YAML
+block was always a shape sketch, not a file-format mandate. `LoopConfig`
+validates itself at construction (max 8 robots, no reused `(corner,
+direction)` slot, no reused name) rather than leaving those as
+documented-only constraints. The roadmap gives `duel` exact spawn corners
+(TL/CW, TR/CCW) but only gives `standoff` urgency (20/20) and a "hold firm"
+framing - not corners. Built `standoff` reusing `duel`'s corners, so the
+pair still meets at a real corridor; flagged as an assumption in both the
+code comment and the loop-diagram artifact ("The O"), not silently
+decided. Would revisit if the user specifies different corners.
