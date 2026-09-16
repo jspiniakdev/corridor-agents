@@ -1,10 +1,13 @@
 # Corridor Agents — Project Plan
 
 *A learning project in multi-agent robotics coordination.*
-*Last updated: 2026-09-09 · Status: Phases 1–7 done; Phase 8 partial (Vertex
-flag-gated, quota-blocked); Phase 9 deferred (staying at 2 robots); Phase 10
-split into 10a (done) + 10b-1/2/3. See `docs/DECISIONS.md` D1–D36 for the
-real record; this file is the north-star plan, kept roughly current.*
+*Last updated: 2026-09-10 · Status: Phases 1–10 done (Phase 8's Claude-on-
+Vertex path permanently dropped - quota request declined outright,
+`--policy gemini` is the working substitute, not a stopgap). Phase 9
+superseded by Phase 11 (D48) - see below. Phase 11 in progress, starting
+with 11a; full design in `docs/PHASE_11_ROADMAP.md`. See `docs/DECISIONS.md`
+D1–D48 for the real record; this file is the north-star plan, kept roughly
+current.*
 
 ---
 
@@ -112,27 +115,31 @@ Four consequences, all practical:
 ```
                         ┌──────────────────────┐
                         │   World / Simulator  │  stateful, long-lived
-                        │  (grid, physics,     │  laptop → small VM
-                        │   collision, ticks)  │
+                        │  (loop, lanes,       │  laptop → Cloud Run Service
+                        │   corridors, life)   │  (Firestore-backed, D38/11c)
                         └───────────┬──────────┘
-                                    │  observations / accepted plans
-              ┌─────────────────────┼─────────────────────┐
+                                    │  observations, far-mouth contender,
+                                    │  accepted plans (D48: discovery is
+                                    │  just another observation field -
+              ┌─────────────────────┼──────────  no separate registry)
               │                     │                     │
        ┌──────┴──────┐       ┌──────┴──────┐       ┌──────┴──────┐
        │  Robot A    │◄─────►│  Robot B    │◄─────►│  Robot C    │
-       │  agent      │  A2A  │  agent      │  A2A  │  agent      │
-       │             │       │             │       │             │
-       │ own identity│       │ own identity│       │ own identity│
-       │ own secrets │       │ own secrets │       │ own secrets │
+       │  agent      │  A2A  │  agent      │  A2A  │  agent      │  ... up to 8
+       │             │  (per corridor      │       │             │  (Phase 11b/c)
+       │ own identity│   contest, not      │       │ own identity│
+       │ own secrets │   fleet-wide)       │       │ own secrets │
        └─────────────┘       └─────────────┘       └─────────────┘
               each: one Cloud Run service, one service account
 
        ┌────────────────────────────────────────────────────────┐
-       │  Registry (who exists, agent cards)  ·  Firestore      │
-       │  Broadcast (announcements)           ·  Pub/Sub        │
-       │  Traces (who said what, when)        ·  Cloud Trace    │
+       │  World state (positions, life, corridors) · Firestore  │
+       │  Traces (who said what, when)             · Cloud Trace│
        └────────────────────────────────────────────────────────┘
 ```
+Registry + Pub/Sub, from the original Phase 9 plan, are gone (D48) - the
+world already knows every position, so discovery is one more field on
+`get_observation`, not a separate broadcast mechanism.
 
 **Critical architectural constraint — the layer split.** An LLM call takes
 1–5 seconds. A robot control loop runs at 10–100 Hz. These cannot be the same
@@ -188,9 +195,12 @@ absolutely can refuse to yield.
 
 Practically, the simulator becomes an MCP server exposing `get_observation()`,
 `propose_move()`, `get_map()`, and each robot is an MCP client. The payoff lands
-at Phase 11: swapping the text grid for a real simulator means writing a new MCP
+at Phase 12: swapping the text grid for a real simulator means writing a new MCP
 server with the same tool names, and **the agents don't change at all.** That is
-the N×M → N+M benefit arriving in our own repo.
+the N×M → N+M benefit arriving in our own repo. (Phase 11's loop world is a
+bigger MCP server than the line ever was, but it's still the same swap-in
+shape - `negotiation.py`, `agent.py`'s policy layer, and the MCP tool
+contract all survive it untouched, per D48's "stays vs. changes" table.)
 
 ### 4.3 A robot is not purely an LLM either
 
@@ -298,30 +308,34 @@ Budget an extra half-day for IAM specifically. Everyone loses time there.
 
 **Actual state (D33, D34, D36):** OIDC agent-to-agent auth done and verified
 live (`robot-b` a locked-down Service, `robot-a` a Job). Claude-on-Vertex is
-built as a flag (`--vertex`, D34) but **not live-verified** — the fresh
-project's `anthropic-claude-sonnet` quota is 0 and the increase was
-auto-denied (support ticket open). **Secret Manager was dropped** (D34): on
-the Vertex path there's no API key left to protect. A `GeminiPolicy` (D36,
+built as a flag (`--vertex`, D34) but **permanently unverified, by design
+now, not by circumstance** — the fresh project's `anthropic-claude-sonnet`
+quota request was declined outright, not just auto-denied pending review;
+no further action planned. **Secret Manager was dropped** (D34): on the
+Vertex path there's no API key left to protect. A `GeminiPolicy` (D36,
 `--policy gemini`) was added as a multi-provider exercise — and since
-Gemini's Vertex quota *is* non-zero, it's the way the deployed pipeline gets
-exercised while the Claude quota is stuck.
+Gemini's Vertex quota *is* non-zero, it's the permanent way the deployed
+pipeline gets exercised, not a stopgap for the Claude quota.
 
-### Phase 9 — Three or more robots — **DEFERRED**
-**~6h · Infra: Pub/Sub, Firestore**
+### Phase 9 — Three or more robots — **SUPERSEDED by Phase 11 (D48)**
 
-Two agents can just talk to each other. Three need **discovery** (who exists?)
-and **broadcast** (announcing to everyone at once). A2A is point-to-point, so
-this gap is ours to fill: Firestore holds the registry of agent cards, Pub/Sub
-carries announcements.
+The original plan: N robots means a `world.py` rewrite (positions/collision
+are pairwise and hardcoded to A/B) plus a real N-way-negotiation design fork
+(2 robots decide one binary; 3+ need an *ordering*, with no central
+coordinator per §4.2) plus discovery/broadcast infra (Firestore registry,
+Pub/Sub, since A2A is point-to-point). That bundle never had a clean first
+step and was deferred indefinitely.
 
-*This is the phase where "multi-agent system" starts being literally true.*
-
-**Deferred by choice.** N robots means a `world.py` rewrite (positions/
-collision are pairwise and hardcoded to A/B) plus a real N-way-negotiation
-design fork (2 robots decide one binary; 3+ need an *ordering*, with no
-central coordinator per §4.2). The discovery/broadcast half only earns its
-keep at 3+ robots. Staying at 2 for now. The Firestore *dependency* still
-arrives early — via Phase 10b-2 below, for world state, not the registry.
+**Superseded, not merely un-deferred.** Reframing the world as a **loop**
+("the O") with directional lanes and two 1-lane pinch-point corridors
+dissolves the N-way fork entirely - every genuine conflict is still exactly
+two robots at one corridor, so the pairwise `negotiate()` engine survives
+untouched; the world absorbs the N-robot part. Discovery collapses too - the
+world already knows every position, so it just tells an approaching robot
+who's at the far mouth, no registry needed. See **Phase 11** below and
+`docs/PHASE_11_ROADMAP.md` for the full design; `docs/DECISIONS.md` D48 for
+the rationale. The Firestore *dependency* still arrived early regardless -
+via Phase 10b-2, for world state, not a registry.
 
 ### Phase 10 — See what's happening
 **Infra: OpenTelemetry → Cloud Trace**
@@ -425,9 +439,42 @@ Split into sub-phases because 10b turned out to be three separate pieces:
 
   **Phase 10b-3b-ii and Phase 10 overall are closed.**
 
-### Phase 11+ — The actual project, indefinitely
+### Phase 11 — The "O": a continuous, multi-robot corridor world
 
-Protocol experiments, a few hours each:
+**In progress. Full design: `docs/PHASE_11_ROADMAP.md`. Rationale: D48.**
+
+Supersedes Phase 9. A rectangular loop, directional lanes, two asymmetric
+1-lane corridors - every genuine conflict stays a pairwise negotiation, the
+world (not the protocol) absorbs the N-robot part. New: a `life`/`urgency`/
+death survival mechanic (drain only while held by a *resolved* corridor
+contest; the negotiation itself is free) - this is the setting the old
+"Phase 11+" protocol experiments always assumed but never had.
+
+- **11a — loop world, 2 LLM robots, in-process.** The `world.py` core
+  rewrite: loop coordinates, directional lanes, two corridors, generalised
+  `reactive_filter`, continuous run (no episode terminus), life/urgency/
+  death. Corridor geometry settled (`North [6,11]`, `South [27,30]` - a
+  revision from the original draft, see D48's note). **Done when:** a full
+  run completes with zero collisions (asserted), both robots lap and
+  re-negotiate both corridors, a robot made to wait can die, and the world
+  numbers are locked.
+- **11b — N robots (3–8), in-process.** Corner/direction spawn config,
+  queuing + "winner passes, re-negotiate", survival/throughput/fairness
+  aggregates in `world_eval.py`. **Done when:** an 8-robot run resolves
+  cleanly and the sweep produces stable numbers.
+- **11c — networked, N processes + deploy.** Discovery through the world
+  (`get_observation` returns the far-mouth contender's name + URL, no
+  registry); `agent.py` de-sided; N Cloud Run services generalising the D41
+  three-service pattern. **Done when:** N deployed robots circulate a
+  deployed loop world over real A2A + OIDC, traced, replayable.
+- **11d — memory / reputation.** Robots recognise repeat opponents; trust,
+  retaliation, exploitation over repeated encounters. Own design pass, out
+  of scope until 11a–11c land.
+
+### Phase 12+ — Protocol experiments, on the loop
+
+What "Phase 11+" used to be, renumbered now that Phase 11 has real content -
+each of these runs *on* the Phase 11 world once it exists, a few hours each:
 
 - Add a cost to communication. Do they get more concise?
 - Model radio as a *physical* resource — range limits, packet loss — so
@@ -440,7 +487,8 @@ Protocol experiments, a few hours each:
 - Let a robot refuse to disclose. Does trust emerge over repeated encounters?
 - Replace the grid with a real simulator, or a ROS 2 bridge, or a cheap rover.
 
-**Phases 1–10 are the substrate. Phase 11 is the project.**
+**Phases 1–10 are the substrate. Phase 11 is a real multi-robot world.
+Phase 12 is the project the substrate was always for.**
 
 ---
 
@@ -457,11 +505,16 @@ Protocol experiments, a few hours each:
 
 ### Where does the simulator run?
 
-The simulator is **stateful and long-lived**, so it does not fit scale-to-zero.
-It stays on the laptop for a long time — probably through Phase 10. When it needs
-to run unattended, it goes on a single small spot VM. Keeping the sim local
-while the agents are in the cloud is a perfectly good intermediate state, and
-it's also a nice forcing function for making the agents genuinely network-based.
+The simulator is **stateful and long-lived**, so it does not fit scale-to-zero
+on its own - but D38 (Phase 10b-2) moved its state into Firestore behind a
+store seam specifically so the *server* holding it could still be stateless
+and deployable. It stayed on the laptop through Phase 10 for in-process/local
+runs; Phase 11c is where it (now the loop world) becomes a real Cloud Run
+Service too, alongside N robot services, generalising the three-service D41
+pattern to N+1. Keeping the sim local while the agents are in the cloud was a
+perfectly good intermediate state for Phases 8–10, and a nice forcing
+function for making the agents genuinely network-based before asking the
+world to be one too.
 
 ### How do we reach the model?
 
@@ -476,17 +529,21 @@ it's also a nice forcing function for making the agents genuinely network-based.
 
 ### State and messaging
 
-- **Firestore** — task state, agent registry, episode results. Serverless,
+- **Firestore** — world state (D38), task state, episode results. Serverless,
   free-tier-friendly, no instance to keep warm.
-- **Pub/Sub** — broadcast announcements, from Phase 9 when there are 3+ agents.
+- **No Pub/Sub, no separate registry.** Original Phase 9 plan; superseded by
+  D48 - the loop world already knows every robot's position, so discovery is
+  a field on `get_observation` (the far-mouth contender's name + URL), not a
+  broadcast mechanism. Would come back if dynamic join/leave (a robot joining
+  a running world) becomes real - see D48's "would change our mind."
 - **A2A webhooks** — for negotiation rounds that outlive an HTTP request. Better
   than holding an SSE connection open for minutes.
 - **Secret Manager** — API keys. Never in the image, never in env vars in git.
 
-### Phase 11 infra: three workloads that are not services
+### Phase 11+ infra: workloads that are not services
 
 The agents never move — Cloud Run, one service each, from Phase 8 onward. What
-changes at Phase 11 is everything *around* them.
+changes from Phase 11 onward is everything *around* them.
 
 **1. Eval sweeps → Cloud Run Jobs.** 200 episodes × 5 agents is batch work with
 a beginning and an end, not a service waiting for traffic. Same container, run
@@ -534,10 +591,9 @@ message.
 
 | Component | Where | Why | Idle cost |
 |---|---|---|---|
-| Robot agents | Cloud Run, 1 service each | Own identity, scale to zero | ~$0 |
-| Simulator | Laptop, later a spot VM | Stateful, long-lived | ~$0 / ~$10 mo |
-| Registry + task state | Firestore | Serverless, tiny data | ~$0 |
-| Broadcast | Pub/Sub | Needed at 3+ agents | ~$0 |
+| Robot agents | Cloud Run, 1 service each (up to 8, Phase 11b/c) | Own identity, scale to zero | ~$0 |
+| World | Laptop (11a/b) → Cloud Run Service (11c) | Firestore-backed since D38, deployable once stateless-behind-the-seam | ~$0 |
+| World state + task state | Firestore | Serverless, tiny data | ~$0 |
 | Traces | Cloud Trace | Multi-agent debugging | ~$0 |
 | Secrets | Secret Manager | Not in git | ~$0 |
 | Model | Anthropic API → Vertex AI | Reasoning | pay per call |
@@ -552,7 +608,7 @@ Keeping this list explicit is what keeps the project alive:
 - ❌ Docker before Phase 7
 - ❌ A2A before Phase 5 — homemade first, on purpose
 - ❌ A real simulator (CARLA, Gazebo, Isaac) — a text grid is enough for a long time
-- ❌ ROS 2 — valuable and career-relevant, but Phase 11+
+- ❌ ROS 2 — valuable and career-relevant, but Phase 12+
 - ❌ Real hardware
 - ❌ A web UI or visualizer — this is a reward, not a prerequisite
 - ❌ An optimal-solver baseline — nice eventually, not needed to start
@@ -563,9 +619,16 @@ Keeping this list explicit is what keeps the project alive:
 ## 8. Cost
 
 - **Phases 1–6:** model tokens only. A few dollars total, if that.
-- **Phases 7–9:** roughly **$0–5/month** in GCP. Cloud Run at zero traffic is
-  free, Firestore and Pub/Sub at this volume are inside the free tier.
-- **Phase 11+:** model tokens dominate, driven by how often the eval suite runs.
+- **Phases 7–10:** roughly **$0–5/month** in GCP at idle - Cloud Run at zero
+  traffic and Firestore at this volume are inside the free tier. The one real
+  cost risk found in practice: `--min-instances=1` robots (needed for the
+  `--serve` idle loop, D40/D41) bill ~$15–40/month combined *while deployed*,
+  not idle - not a Cloud Run "surprise," a deliberate tradeoff, and why they
+  get deleted at the end of every session that stood them up (see `CLAUDE.md`).
+- **Phase 11+:** model tokens dominate, driven by how often the eval suite
+  runs - now for real, not hypothetically: 11a–11b's survival mechanic
+  specifically needs LLM policies to be meaningful (D48), so sweeps aren't
+  optional the way they were for the scripted-policy baselines.
 
 **The real cost risk is eval cost, not infra cost.** Five agents × several
 rounds × 50 episodes is thousands of model calls per experiment. If one run
@@ -580,11 +643,19 @@ keeping the default episode count low with a `--full` flag for the big sweep.
 Metrics, established in Phase 2 and tracked forever after:
 
 - **Agreement rate** — how often do they reach a decision at all?
-- **Correctness** — did the genuinely more urgent robot go first?
+- **Correctness** — did the genuinely more urgent robot go first? From Phase
+  11: per-encounter, the robot with the lower remaining time-to-death
+  (`life / urgency`) should go first.
 - **Efficiency** — messages exchanged per resolution.
 - **Deadlock rate** — from Phase 3, when movement is real.
-- **Honesty** — from Phase 11, when incentives are individual: how often does a
-  robot's claim about itself match its actual private state?
+- **Survival** — from Phase 11: life preserved, deaths, time-to-first-death.
+  A run where nobody yields and everybody dies is not a good outcome even if
+  every individual negotiation "worked."
+- **Throughput / fairness** — from Phase 11b (3+ robots): corridor crossings
+  per unit time, and whether the same robot(s) win disproportionately across
+  a seeded run.
+- **Honesty** — from Phase 12, when incentives are individual: how often does
+  a robot's claim about itself match its actual private state?
 
 Every metric is measured over **seeded, repeated** scenarios. LLM
 non-determinism means a single run tells you nothing, and chasing phantom
@@ -708,7 +779,7 @@ pool, no migrations.
 | Name | What it is | Used for |
 |---|---|---|
 | **Cloud Run Jobs** | Cloud Run for tasks that finish, not services that wait | Eval sweeps (Phase 11) |
-| **Pub/Sub** | A message queue — one publisher, many receivers | Broadcast announcements (Phase 9) |
+| **Pub/Sub** | A message queue — one publisher, many receivers | Not used - Phase 9's planned registry/broadcast was dropped (D48); the loop world does discovery itself |
 | **Secret Manager** | Somewhere for API keys that isn't source code | Phase 8 onward |
 | **Cloud Trace** | Timeline of what called what, and how long it took | Debugging negotiations (Phase 10) |
 | **Vertex AI** | Google's ML platform | Calling Claude from inside GCP (Phase 8) |
@@ -780,8 +851,8 @@ as one thing:
 and, if there is a conflict, negotiates and commits to a plan — a small state
 machine with occasional model calls, not open-ended tool use. Adopting a
 framework to obtain a while-loop would buy someone else's opinions about memory
-in exchange for code we can write in an afternoon. Revisit at Phase 11 if robots
-start needing genuine multi-step tool use.
+in exchange for code we can write in an afternoon. Revisit at Phase 11+ if
+robots start needing genuine multi-step tool use.
 
 ---
 

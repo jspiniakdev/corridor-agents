@@ -212,10 +212,12 @@ locally, the service account on Cloud Run), no API key at all. Off by
 default: local venv/Compose are unchanged. Model IDs need no translation for
 Sonnet 5 (current-generation Vertex models use the bare first-party ID, not
 a dated `@` suffix); `--vertex-region` defaults to `"global"`, Vertex's own
-recommended region. **Not yet live-verified against the real Vertex API or
-redeployed to Cloud Run** - the `anthropic-claude-sonnet` Vertex quota is 0
-on this fresh project and the increase was auto-denied (support ticket
-open); construction is unit-tested.
+recommended region. **Not live-verified against the real Vertex API, and
+won't be** - the `anthropic-claude-sonnet` Vertex quota increase on this
+project was declined outright, not just auto-denied pending review; no
+further action planned on this path. Construction stays unit-tested and
+the flag stays in the code (harmless), but `--policy gemini` (D36) is the
+permanent substitute, not a stopgap.
 
 **GeminiPolicy added (D36): the negotiation policy, reimplemented against a
 second provider.** `--policy gemini` runs Claude's exact negotiation
@@ -234,9 +236,9 @@ roles, response shape, token-count fields. This is D7 taken one step
 further (an agent isn't tied to a *provider* either) and it de-risks D34's
 Bedrock/Foundry "would change our mind" clause. **Verified live** - real
 Gemini negotiation, correct outcome, `provider=gemini` on the trace span.
-Bonus: Gemini's Vertex quota *is* non-zero here, so `--policy gemini` is a
-working way to exercise the full deployed pipeline (10b) while the Claude
-quota is stuck.
+Bonus: Gemini's Vertex quota *is* non-zero here, so `--policy gemini` is the
+working way to exercise the full deployed pipeline (10b) - permanently, now
+that Claude-on-Vertex's quota request was declined outright.
 
 **Secret Manager: deliberately dropped, not forgotten.** Once Cloud Run
 agents use `--vertex`, there's no API key left on that path for Secret
@@ -420,16 +422,39 @@ a session, without asking.** Both run `--min-instances=1` and bill
 its own and costs nothing idle - leave it. Redeploy recipe (image, args per
 side) is in D41 above.
 
-**Phase 9 (three or more robots) is deliberately skipped for now** - it's
-a `world.py` rewrite plus a real N-way-negotiation design fork, and the
-discovery/broadcast half (Firestore registry, Pub/Sub) only earns its keep
-at 3+ robots. Staying at 2 robots.
+**Phase 8's Claude-on-Vertex is dead, not blocked.** The `anthropic-claude-
+sonnet` Vertex quota increase was declined outright (not just auto-denied
+pending review) - no further action planned on this path. `--policy gemini`
+(D36) stays the permanent way to exercise the deployed pipeline; `--vertex`/
+`GeminiPolicy._budgets` etc. all stay in the code (harmless, tested), just
+don't expect `--policy claude --vertex` to ever work on this project.
 
-**Next:** Phase 8 - Claude-on-Vertex still **blocked on a GCP quota
-increase** (auto-denied, support ticket open); once it clears, `--policy
-claude` on Vertex is a policy swap, not an infra change (D36). Otherwise
-Phase 10 is done; Phase 11+ (see `PLAN.md`) is open-ended protocol
-experiments whenever there's appetite. See `PLAN.md` §5.
+**Phase 9 (three or more robots) is superseded by Phase 11, not merely
+un-deferred (D48).** The original plan needed a `world.py` rewrite plus a
+real N-way-negotiation design fork plus discovery/broadcast infra
+(Firestore registry, Pub/Sub) - that bundle never had a clean first step.
+Reframing the world as a **loop** ("the O") with directional lanes and two
+1-lane pinch-point corridors dissolves the fork: every real conflict stays
+exactly two robots at one corridor, so the pairwise `negotiate()` engine
+survives untouched and the world absorbs the N-robot part. Discovery drops
+the registry too - the world already knows every position, so it just
+tells an approaching robot who's at the far mouth. Full design:
+`docs/PHASE_11_ROADMAP.md`. Rationale: D48.
+
+**Phase 11 — in progress, starting with 11a (loop world, 2 LLM robots,
+in-process).** The corridor geometry in the roadmap was revised before any
+code was written: the original draft (`North [8,13]`, `South [25,28]`)
+reproduced the exact D47 failure mode - simulated live, the flagship
+`duel` starter config's first North crossing skipped negotiation entirely,
+because the near robot's 2-cell approach outran the far robot's 7-cell
+approach before either came within `SENSOR_RANGE`. Fixed by adopting
+`North [6,11]` / `South [27,30]`, a shift the roadmap had already floated
+as a fallback for an unrelated concern. See D48.
+
+**Next:** Phase 11a implementation - the `world.py` core rewrite (loop
+coordinates, directional lanes, two corridors, generalised
+`reactive_filter`, continuous run, life/urgency/death). See `PLAN.md` §5
+and `docs/PHASE_11_ROADMAP.md` for the full spec and sub-phase breakdown.
 
 ## How to run things
 
@@ -510,7 +535,8 @@ docker compose down               # when actually done
 # --policy llm side calls Claude via Vertex AI instead of the direct API -
 # no .env/API key needed, just real GCP credentials (gcloud auth
 # application-default login) and a project with Vertex AI enabled.
-# BLOCKED: the anthropic-claude-sonnet Vertex quota is 0 on this project.
+# DEAD: the anthropic-claude-sonnet Vertex quota request was declined
+# outright on this project - not planned to work. Use --policy gemini below.
 python agent.py --scenario <id> --side a --policy llm --vertex --vertex-project corridor-agents --peer-url http://127.0.0.1:9001
 
 # Phase 8/D36: --policy gemini - Claude's negotiation policy, run against

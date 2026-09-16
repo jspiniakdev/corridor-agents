@@ -15,16 +15,19 @@ A learning project, built one layer at a time, to experiment with:
 6. Negotiation for robotics — mutual exclusion over shared space, and the
    deadlocks that come from getting it wrong
 
-**Status: Phases 1–7 complete; Phase 8 partial; tracing through Phase 10b, with
-the deployed world Service (10b-3b-ii) still to wire up.** Two robots negotiate
-over a real 1D grid, over real A2A (peer to peer, no coordinator), moving through
-a world that is its own MCP server — with a structural guarantee they can never
-collide. The fleet runs containerized under Docker Compose, and both robots
-deploy to Cloud Run with per-agent service accounts and OIDC agent-to-agent auth.
-The negotiation policy runs against either Claude or Gemini. The whole path is
-traceable to Cloud Trace, and world state can live in Firestore. Phase 9 (3+
-robots) is deliberately deferred — staying at 2. See `docs/PLAN.md` for the full
-arc.
+**Status: Phases 1–10 done. Phase 9 superseded by Phase 11 — a loop-shaped,
+multi-robot world ("the O") is now in progress, replacing the old "three or
+more robots" plan entirely.** Two robots negotiate over a real 1D grid, over
+real A2A (peer to peer, no coordinator), moving through a world that is its own
+MCP server — with a structural guarantee they can never collide. The fleet runs
+containerized under Docker Compose, and deploys to Cloud Run as three real
+Services (`world`, `robot-a`, `robot-b`) with per-agent service accounts, OIDC
+agent-to-agent auth, and a Firestore-backed world reachable by nothing local.
+The negotiation policy runs against Gemini via Vertex (Claude-on-Vertex's quota
+request was declined outright — not a temporary block, a closed path). The
+whole pipeline is traceable end to end in Cloud Trace, and the network replay
+visualizer works against a live deployed episode. See `docs/PLAN.md` for the
+full arc, `docs/PHASE_11_ROADMAP.md` for what's being built now.
 
 ## Run it
 
@@ -33,7 +36,7 @@ Python 3.13). Tests need no API key and run in ~1s:
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests/ -q        # 126 tests, zero API calls
+python -m pytest tests/ -q        # 186 tests, zero API calls
 ```
 
 ### In-process (Phases 1–3): one process, no network
@@ -101,27 +104,40 @@ docker compose up --build         # world + robot-a + robot-b, one command
 The `world` container stays up after the robots exit; the local debug tools work
 against it unchanged via the mounted `./experiments` volume.
 
-### Deployed (Phase 8)
+### Deployed (Phase 8, 10b): three real Cloud Run Services
 
-`robot-b` runs as a Cloud Run Service (locked down, own service account),
-`robot-a` as a Cloud Run Job (one-shot: dial, negotiate, exit). The full
-`gcloud` commands and the one-time IAM setup are in `CLAUDE.md` and `docs/DECISIONS.md`
-(D33). World state can move to Firestore with `world_server.py --firestore`;
-`visualize_network.py --firestore` replays a Cloud Run episode with nothing local.
+`world`, `robot-a`, and `robot-b` each deploy as their own Service, own
+service account, Firestore-backed world state, OIDC agent-to-agent auth,
+`--trace` wired to Cloud Trace. `robot-a` started as a one-shot Cloud Run Job
+(D33) and was converted to a Service (D41) once `--serve` (D40) let robots idle
+between episodes instead of exiting. The full `gcloud` commands and one-time
+IAM setup are in `CLAUDE.md` and `docs/DECISIONS.md` (D33, D41).
+`visualize_network.py --firestore` replays a live deployed episode with
+nothing local running. **Cost note:** `robot-a`/`robot-b` need
+`--min-instances=1` for `--serve`'s background loop, which bills ~$15–40/month
+combined even idle — delete them between sessions (`world` scales to zero for
+free; leave it).
 
 ## Layout
 
 ```
 docs/PLAN.md                 the project, the phases, the infra reasoning — source of truth
-docs/DECISIONS.md            why things were chosen (D1–D40)
+docs/DECISIONS.md            why things were chosen (D1–D48)
 docs/SETUP.md                the working environment and gotchas already hit
+docs/PHASE_11_ROADMAP.md     the loop-world design (Phase 11, in progress) - geometry,
+                              lanes, life/urgency/death, sub-phase breakdown
 
 src/negotiation.py           messages, policies (incl. LLMPolicy / GeminiPolicy), the exchange loop
 src/scenarios.py             corridor scenarios with hidden ground-truth urgency; for_side() slicing
 src/observation.py           computes what a robot can see from position + sensors
-src/world.py                 the grid, the reactive/executive layers, the tick loop
-src/wire.py                  A2A message (de)serialization
-src/tracing.py               stdlib-only OpenTelemetry shim, no-op until --trace
+src/world.py                 the linear grid, reactive/executive layers, the tick loop (Phases 1-10)
+src/loop_world.py            NEW (Phase 11a, in progress): the loop world - geometry, directional
+                              lanes, two corridors, generalized reactive_filter, negotiation trigger,
+                              life/urgency/death. Lives alongside world.py, not in place of it - see
+                              D48's file-layout note. No "winner": survival_result() reports ticks
+                              survived per robot, nothing declares anyone a winner (D48 addendum).
+src/wire.py                   A2A message (de)serialization
+src/tracing.py                stdlib-only OpenTelemetry shim, no-op until --trace
 
 run.py / eval.py             one negotiation / the measurement sweep (Phase 2)
 simulate.py / world_eval.py  one grid episode / the grid-episode sweep (Phase 3)
@@ -229,26 +245,30 @@ tests/                       deterministic tests, zero API calls
   string passed to it — fatal across containers. Fixed with `--advertise-url`.
   See D32.
 
-### Phase 8 — deploy *(partial)*
+### Phase 8 — deploy
 
-- **`robot-b` is a Cloud Run Service, `robot-a` a Cloud Run Job.** `--side a`
-  without `--world-url` is a genuine one-shot process (dial, negotiate, exit);
-  Jobs are exactly right for that and exactly wrong for what Services expect.
-- **Agent identity is now a security boundary.** Each robot has its own service
-  account; they authenticate to each other with real OIDC ID tokens (`--auth`).
-  Verified live both ways, and an unauthenticated `curl` to `robot-b` confirmed
-  `403`. See D33.
-- **Claude on Vertex (D34, `--vertex`)** — authenticates as the calling process's
-  GCP identity, no API key. Built and unit-tested but **not yet live-verified**:
-  the fresh project's `anthropic-claude-sonnet` quota is 0 (support ticket open).
-- **`GeminiPolicy` (D36, `--policy gemini`)** — Claude's exact negotiation
-  contract, reimplemented against Gemini via Vertex. Verified live. Since
-  Gemini's Vertex quota *is* non-zero, it's how the deployed pipeline gets
-  exercised while the Claude quota is stuck.
-- **Secret Manager was dropped, deliberately (D34).** On the Vertex path there's
-  no API key left in the cloud for it to protect.
+- **`robot-b` and (from D41) `robot-a` both run as Cloud Run Services.**
+  `robot-a` started as a Job (`--side a` without `--world-url` was a genuine
+  one-shot: dial, negotiate, exit) and was converted once `--serve` (D40) gave
+  robots an idle loop between episodes — a Job can't do that, a Service can.
+- **Agent identity is a real security boundary.** Each robot has its own
+  service account; they authenticate to each other with real OIDC ID tokens
+  (`--auth`). Verified live, and an unauthenticated `curl` to `robot-b`
+  confirmed `403`. See D33.
+- **Claude on Vertex (D34, `--vertex`) is built, unit-tested, and permanently
+  dead on this project** — the `anthropic-claude-sonnet` Vertex quota increase
+  was declined outright, not just auto-denied pending review. No further
+  action planned; the flag stays in the code (harmless) but won't work here.
+- **`GeminiPolicy` (D36, `--policy gemini`)** is the permanent substitute, not
+  a stopgap — Claude's exact negotiation contract, reimplemented against
+  Gemini via Vertex, Gemini's Vertex quota being the one that's actually
+  non-zero. The deployed robots run `gemini-2.5-pro` (D42-era note: pro
+  reasons about the actual stakes instead of grasping at a bogus proximity
+  claim, and resolves in ~2 messages vs flash's ~5).
+- **Secret Manager was dropped, deliberately (D34).** On the Vertex path
+  there's no API key left in the cloud for it to protect.
 
-### Phase 10 — see what's happening
+### Phase 10 — see what's happening. **Closed (D46).**
 
 - **10a (D35):** `agent.py --trace` emits `negotiation.episode` →
   `negotiation.turn` → `llm.respond` on the initiator, `negotiation.handle` on
@@ -269,20 +289,71 @@ tests/                       deterministic tests, zero API calls
   `reset_world()` starts a fresh episode and clears per-episode state. `--auth`
   now also mints an OIDC token for the MCP world channel, so a locked-down
   deployed world Service is reachable. `trigger_episode.py` is the start button.
-  Verified live 3-terminal: two `--serve` robots ran 3 episodes without
-  restarting.
+- **10b-3b-ii (D41):** the full three-Cloud-Run-Service deployment —
+  `world` (`--firestore --trace`, scale-to-zero) plus `robot-a`/`robot-b`
+  (`--world-url --serve --auth --trace`, `--min-instances=1`). Verified live:
+  a clean episode, and **one ~307-span Cloud Trace across all three Services.**
+- **Four real deployed-path bugs, found and fixed (D42–D45):** an unrefreshed
+  OIDC token crash-looping the robots hourly; `propose_action` not being
+  idempotent (a retried MCP call double-moved a robot); `record_negotiation`
+  with no episode guard, letting a late write from a dead episode clobber
+  live state; and an LLM claiming a false proximity advantage because the
+  observation didn't give it the other robot's actual distance to the
+  corridor. Each verified fixed against the real deployment, not just locally.
+- **D46:** the `--firestore` visualizer render, which looked broken, turned
+  out to need zero code change once D42–D45 landed — verified with a headless
+  jsdom frame-stepper (no browser in this environment) stepping through every
+  frame of a real deployed episode. **Phase 10 closed.**
+- **D47 (later, a grid tuning pass):** the linear grid lengthened (`MAX_POSITION`
+  8→14) and the corridor moved right of center, with a real bug caught and
+  fixed along the way — the first attempt at the shift silently skipped
+  negotiation on the flagship demo scenario (an approach-room asymmetry
+  outrunning `SENSOR_RANGE`), confirmed by simulation before shipping.
+
+## Phase 9 → Phase 11: "the O"
+
+**Phase 9 ("three or more robots") is superseded, not merely un-deferred
+(D48).** The original plan needed a `world.py` rewrite plus a real
+N-way-negotiation design fork plus discovery/broadcast infra (Firestore
+registry, Pub/Sub) — that bundle never had a clean first step. Reframing the
+world as a **loop** with directional lanes and two 1-lane pinch-point
+corridors dissolves the fork entirely: every genuine conflict is still
+exactly two robots at one corridor, so the pairwise `negotiate()` engine
+survives untouched and the world absorbs the N-robot part. Discovery drops
+the registry too — the world already knows every position, so it just tells
+an approaching robot who's at the far mouth. Full design:
+`docs/PHASE_11_ROADMAP.md`; rationale: D48.
+
+### Phase 11a — loop world, in progress
+
+Building alongside `world.py`, not replacing it (D48's file-layout note —
+`world_server.py`/`world_store.py`/`agent.py` and the deployed pipeline all
+import the linear grid directly, and none of that changes until 11c).
+
+- **Step 1 (done):** `src/loop_world.py`'s geometry and reactive safety
+  layer — loop coordinates (`L=44`, two corridors), directional lanes,
+  `reactive_filter`/`apply` generalized from two named robots to an
+  arbitrary set. Same discipline as D12: independently re-derived every
+  tick, so a bug above it can't cause a real collision.
+- **Step 2 (done):** sensing, the negotiation trigger, and life/urgency/death.
+  A per-corridor `CorridorContest` replaces the linear world's one
+  whole-episode `priority` — retired once both sides have passed, so the
+  same corridor negotiates fresh for the next encounter. **No "winner"
+  anywhere** (D48 addendum) — going first through a corridor isn't an
+  outcome, just whose turn it is; the only real result is survival
+  (`survival_result()` reports ticks-alive per robot).
+- **Steps 3–6 (not started):** the config format (`duel`/`standoff` starter
+  scenarios), loop-aware observation composition, the CLI driver
+  (`loop_simulate.py`), and verification against a real LLM policy.
+
+See `docs/PHASE_11_ROADMAP.md` for the full sub-phase breakdown (11a–11d) and
+the corridor-geometry bug found and fixed during design review, before any
+code was written.
 
 ## Next
 
-- **A live Vertex smoke test** — blocked on the GCP quota increase (auto-denied
-  on the fresh project, support ticket open). Then redeploy `robot-a`/`robot-b`
-  with `--vertex` + `--trace`.
-- **Phase 10b-3b-ii** (all `gcloud`) — a `world@` service account, IAM bindings
-  (`roles/datastore.user`, `roles/cloudtrace.agent`, `roles/run.invoker` for the
-  robot SAs), deploy `world_server.py` as a Service (`--firestore --trace`),
-  convert `robot-a` Job→Service, redeploy both with `--world-url --serve`, and
-  verify the 3-service trace tree. See `docs/PLAN.md` §5.
-
-**Phase 9 (three or more robots) is deliberately skipped** — a `world.py` rewrite
-plus an N-way-negotiation design fork, and the discovery/broadcast half only
-earns its keep at 3+ robots. Staying at 2.
+Continue Phase 11a: the config format, loop-aware observation composition,
+the `loop_simulate.py` driver, then verify a real run (zero collisions
+asserted, both robots lap and re-negotiate both corridors, a robot can die
+under an adversarial config) against a real LLM policy. See
+`docs/PHASE_11_ROADMAP.md`'s sub-phase list.

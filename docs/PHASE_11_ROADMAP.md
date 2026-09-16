@@ -106,10 +106,12 @@ robot list returning one action per robot.
   pairwise, `goes_first ∈ {me, other}`, one PROPOSE + one ACCEPT, `max_turns`
   budget. `negotiation.py`, `Message`, the LLM tool schema, `agent_executor.py`'s
   1:1 ping-pong: all stay.
-- **Queue resolution:** the winner passes through; then whoever is now at the
-  front of each side **re-negotiates**. A robot that has been waiting has lower
-  life, so its next contest is weighted toward it — no starvation, no batch-drain
-  rule needed.
+- **Queue resolution:** whoever goes first passes through; then whoever is now
+  at the front of each side **re-negotiates**. A robot that has been waiting has
+  lower life, so its next contest is weighted toward it — no starvation, no
+  batch-drain rule needed. (No notion of a "winner" anywhere in this - going
+  first through one corridor decides nothing about how either robot is
+  actually doing. See the life/urgency section below and D48's addendum.)
 
 ### Discovery — through the world
 `get_observation` already sees all positions. It returns, for the corridor a
@@ -141,14 +143,14 @@ logic needs only `L`, the two corridor ranges, and the 4 corner positions.
 Rectangle **W = 16** (top & bottom), **H = 6** (left & right) → **`L = 44`**.
 
 ```
-        TL(0)                North [8–13]              TR(16)
+        TL(0)                North [6–11]              TR(16)
           ●━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━●
           ┃       ┃    1-lane    ┃                   ┃
    left   ┃       ┗━━━━━━━━━━━━━━┛                   ┃  right
    side   ┃                                         ┃  side
  pos 38–43┃                          ┏━━━━━━━━┓      ┃  pos 16–21
           ●━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━┻━━━━━━●
-        BL(38)                    South [25–28]      BR(22)
+        BL(38)                    South [27–30]      BR(22)
 
   CW  = pos increasing: TL→TR (top), TR→BR (right), BR→BL (bottom), BL→TL (left)
   CCW = pos decreasing
@@ -158,38 +160,59 @@ Rectangle **W = 16** (top & bottom), **H = 6** (left & right) → **`L = 44`**.
 |---|---|
 | Perimeter `L` | 44 |
 | Corner / spawn positions | TL 0, TR 16, BR 22, BL 38 |
-| **North corridor** | `pos 8–13`, length **6**, upper side, shifted toward TR |
-| **South corridor** | `pos 25–28`, length **4**, lower side, shifted toward BR |
+| **North corridor** | `pos 6–11`, length **6**, upper side, shifted toward TR |
+| **South corridor** | `pos 27–30`, length **4**, lower side, shifted toward BR |
 | Sensor range | 10 (a robot at its boundary sees the whole corridor + ~4 cells past the far mouth) |
+
+*(Revised from the original `[8–13]`/`[25–28]` draft - see "Known tight
+spots" below. The original numbers had a real bug, not just a stylistic
+issue: verified live, in the `duel` starter config, with the original
+placement R2 (TR/CCW, only 2 cells from its boundary) reaches North and
+starts crossing before R1 (TL/CW, 7 cells out) ever comes within
+`SENSOR_RANGE`=10 - `sensed_other` is false, R2 claims the corridor alone,
+and no negotiation happens on the flagship scenario's first crossing. This
+is the exact D47 failure mode from the linear-grid phase (an approach-room
+asymmetry outrunning a sensor range that isn't scaled to it) - see
+`DECISIONS.md` D47 and D48. The shift below was already proposed as a
+fallback for a different concern; adopting it as the default fixes both.)*
 
 ### Boundary (stop-and-wait) cells and queue room
 
 | corridor | CW boundary | CCW boundary | CW approach room | CCW approach room |
 |---|---|---|---|---|
-| North `[8–13]` | 7 | 14 | TL→7 = **7 cells** | TR→14 = **2 cells** |
-| South `[25–28]` | 24 | 29 | BR→24 = **2 cells** | BL→29 = **9 cells** |
+| North `[6–11]` | 5 | 12 | TL→5 = **5 cells** | TR→12 = **4 cells** |
+| South `[27–30]` | 26 | 31 | BR→26 = **4 cells** | BL→31 = **7 cells** |
 
 Beyond the approach room, a queue backs up around the previous corner onto the
-adjacent side.
+adjacent side. Confirmed by simulation: at `sensor_range=10`, whichever robot
+reaches its boundary first is now within sensing distance of the other by
+then (gap 8 in both cases) - a real negotiation fires on both corridors for
+the `duel` config's first crossing.
 
 ### The asymmetries this bakes in
 1. **Corridor length 6 vs 4** — losing North costs ~50% more wait than losing
    South, so robots should fight harder for North.
-2. **Queue room flips by direction** — CW robots get a long queue at North, a
-   tight one at South; CCW robots get the mirror. Each direction has one "easy"
-   corridor and one "hard" one, and they are opposite.
+2. **Queue room flips by direction** — CW robots get a somewhat longer queue
+   at North (5 vs 4), a tighter one at South (4 vs 7); CCW robots get the
+   mirror. Each direction has one "easier" corridor and one "harder" one, and
+   they are opposite - gentler now than the original draft's 7-vs-2 split,
+   but still real.
 3. **North is both the long corridor and the tight-queue one for CCW** → CCW
    robots have it slightly worse overall. Deliberate.
-4. **Inter-corridor gaps** — 12 cells on the short hop, 24 on the long breather,
-   both directions, phased oppositely around the loop.
+4. **Inter-corridor gaps** — recompute at implementation time against the
+   revised boundaries above; the original draft's "12 / 24" figures were
+   measured against the pre-shift geometry and no longer apply as-is. Still
+   phased oppositely around the loop by construction (the two corridors sit
+   symmetrically opposite each other on the rectangle).
 
 ### Life / urgency (coupled numbers)
 `life = 100`, fixed. A robot drains `urgency` points **per tick that it is held
 `wait`ing by a resolved corridor contest** — after the negotiation concludes,
 while the corridor is occupied by / committed to the other robot (or while queued
 behind such a robot). Negotiation-in-progress ticks are free (see the mechanic
-above). "Lost negotiations until death" is a function of `urgency × blocked-time`,
-and blocked-time ≈ the corridor's length (how long the winner takes to clear it):
+above). Ticks blocked waiting until death is a function of `urgency ×
+blocked-time`, and blocked-time ≈ the corridor's length (how long the robot
+that goes first takes to clear it):
 
 | `urgency` | role | survives a lost North (~6-tick block) | a lost South (~4-tick) |
 |---|---|---|---|
@@ -225,24 +248,26 @@ the higher-`urgency` robot; it diverges later as waiting robots lose life.
     should deadlock at the first corridor and both bleed out. Confirms deadlock
     is lethal and death works.
   - **`crowd`** (11b) — 6 robots, mixed corners / directions / urgency.
-    Exercises queuing and "winner passes, re-negotiate".
+    Exercises queuing and "whoever goes first passes, then re-negotiate".
 
 ### Known tight spots / to settle at implementation
-- **TR robot heading CCW → North: 2-cell approach** (was 0 — corridor used to
-  touch the corner). Better, but if the cold-start-into-negotiation pathology
-  still shows, shift North to `[6,11]` (4-cell clearance) at the cost of the
-  "North hugs TR" flavour.
-- **BR robot heading CW → South: 2-cell approach** (symmetric to the above).
-  Either shift South to `[27,30]` to match, or just don't use that spawn slot in
-  the default configs.
-- **When exactly does the loser's drain clock start?** Decided: *not* during the
-  negotiation (LLM latency is an artifact, not a cost). Two candidate start
-  points for the post-negotiation block: (a) the moment agreement is reached and
-  the loser is holding at its boundary, or (b) only once the winner physically
-  enters the corridor. Recommend **(a)** — "you agreed to wait; waiting is the
-  cost" — and keep negotiations firing near-arrival so (a) ≈ (b). Fall back to
-  (b) if early-fire negotiations (sensing the other before it arrives) inflate
-  the block time well past a corridor-length. The clockless world (D17) helps
+- **Corridor placement already shifted once** (North `[8,13]`→`[6,11]`, South
+  `[25,28]`→`[27,30]`) - originally floated as a fallback for a "cold start"
+  robustness worry, adopted as the actual default once it turned out the
+  original placement had a sharper problem: it silently skipped negotiation
+  entirely on the `duel` config's first North crossing (see the geometry
+  table above, D47/D48). The remaining approach-room asymmetry (5v4 at North,
+  4v7 at South) is intentional - it's the "asymmetries this bakes in" - just
+  no longer large enough to outrun `SENSOR_RANGE`=10.
+- **When exactly does the waiting robot's drain clock start?** Decided: *not*
+  during the negotiation (LLM latency is an artifact, not a cost). Two candidate
+  start points for the post-negotiation block: (a) the moment agreement is
+  reached and the robot that isn't going first is holding at its boundary, or
+  (b) only once the other one physically enters the corridor. Recommend **(a)**
+  — "you agreed to wait; waiting is the cost" — and keep negotiations firing
+  near-arrival so (a) ≈ (b). Fall back to (b) if early-fire negotiations
+  (sensing the other before it arrives) inflate the block time well past a
+  corridor-length. The clockless world (D17) helps
   here: a robot away negotiating isn't polling, so it accrues no ticks anyway;
   the only case needing explicit suppression is a robot *queued behind* an
   in-progress contest.
@@ -263,16 +288,37 @@ the higher-`urgency` robot; it diverges later as waiting robots lose life.
   contest.
 - `src/tracing.py` — generic; one trace tree per pairwise negotiation.
 
-### Changes
-| File | Change |
+### File layout: additive, not an in-place rewrite (decided this session)
+
+The table below still describes the *logic* each piece needs, but 11a lands
+it as **new files alongside the untouched linear-grid ones**, not a rewrite
+of `world.py`/`simulate.py` in place. `world_server.py`, `world_store.py`,
+`agent.py`, and the currently-deployed three-Cloud-Run-Service pipeline all
+import directly from today's `world.py` (`A_START`, `CORRIDOR_ZONE`, etc.),
+and none of that gets touched until 11c - rewriting `world.py` in place now
+would immediately red-line `test_world_store.py`/`test_world_server.py` and
+leave them broken for the entire 11a/11b window, which runs against
+"prefer the smallest change that leaves a working, runnable thing" (`CLAUDE.md`
+§Pacing). So: `src/loop_world.py` (new) holds the loop geometry, lanes,
+generalised `reactive_filter`, life/urgency/death; `loop_simulate.py` (new)
+drives a continuous run against it. `src/world.py`, `simulate.py`,
+`world_server.py`, `world_store.py`, `agent.py`, and every currently-passing
+test and deployed service stay exactly as they are through 11a and 11b. The
+old linear module gets retired only at 11c, when `world_server.py`/`agent.py`
+actually get rewired to the loop and the deployed services are replaced -
+at that point 11c's own plan (below) is the real migration, not a parallel
+maintenance burden accepted indefinitely.
+
+### Changes (the logic, wherever it ends up living)
+| File (11a/11b: new; 11c: rewires the originals) | Change |
 |---|---|
-| `src/world.py` | **Core rewrite.** `WorldState.a/.b` → `robots: dict[str, RobotState]`. Loop positions (mod `L`), `lane` field, two corridor spans, directional-lane model. `reactive_filter` / `apply` / `executive_decide` → list passes. `priority` (one name) → per-corridor priority. Life/urgency/death bookkeeping. Remove `run_episode`'s `reached_target` termination → run for a fixed tick budget. `RobotState` itself mostly survives (add `lane`, drop fixed `boundary`/`target` constants — derive from geometry). |
-| `src/scenarios.py` | `Scenario` `a_*/b_*` → `robots: list[{situation, urgency}]` (urgency = drain rate). `should_go_first` → per-encounter "who is closer to death" is computed live, not stored. `for_side(id, "a"|"b")` → `for_robot(id, index_or_name)`. |
-| `src/observation.py` | Single `other_*` → a list of sensed others (ahead / behind / at which corridor). Drop "approaching from the opposite end" phrasing (false on a loop). |
-| `world_store.py` | `world/current` doc: `{a_position, b_position}` → `{robots: {name: {pos, lane, dir, life, ...}}, corridors: {...}}`. `state_from_positions(a, b)` → from the robots map. `_resolve` generalises "all others wait" (already its logic, currently a/b-branched). |
-| `world_server.py` | `get_observation(side)` → keyed by robot name; returns list of sensed others + the far-mouth contender (name + URL). `propose_action` keyed by name, validates the name. `record_negotiation` → possibly several per run, keyed by (corridor, tick). |
-| `agent.py` | Drop `--side a/b`; take `--name` / `--advertise-url` / `--world-url`. Remove `--peer-url` (learned from the world). `build_robots` → `me` + a *set* of possible others. `is_my_turn_to_initiate` → "smaller name in the contending pair" (already lexicographic). `priority_holder` / `dial_holder` / `incoming_active` → per-corridor dicts. |
-| `simulate.py` | Continuous run over a tick budget; survival / throughput / death readout instead of the 6-tuple tick dump. |
+| `src/loop_world.py` (new in 11a) | Loop positions (mod `L`), `lane` field, two corridor spans, directional-lane model, `robots: dict[str, RobotState]` (not `.a`/`.b`). `reactive_filter` / `apply` / `executive_decide` → list passes. `priority` (one name) → per-corridor priority. Life/urgency/death bookkeeping. No `reached_target` termination - runs for a fixed tick budget. `RobotState` itself mostly survives from `world.py` (add `lane`, drop fixed `boundary`/`target` constants — derive from geometry). |
+| `src/scenarios.py` (11a: additive - a new loop-shaped config type, not a rewrite of the existing `Scenario`) | New config shape: `robots: list[{corner, direction, situation, urgency}]` (urgency = drain rate). "Who should go first" is computed live per-encounter (closer to death), not stored. A new loader, not a change to `for_side(id, "a"|"b")` - that stays for the linear-grid path. |
+| `src/observation.py` (11a: additive) | A new loop-aware composer alongside the existing one: single `other_*` → a list of sensed others (ahead / behind / at which corridor). Drops "approaching from the opposite end" phrasing (false on a loop). |
+| `loop_simulate.py` (new in 11a) | Continuous run over a tick budget; survival / throughput / death readout instead of the 6-tuple tick dump `simulate.py` produces. |
+| `world_store.py` (11c, not 11a/11b) | `world/current` doc: `{a_position, b_position}` → `{robots: {name: {pos, lane, dir, life, ...}}, corridors: {...}}`. `state_from_positions(a, b)` → from the robots map. `_resolve` generalises "all others wait" (already its logic, currently a/b-branched). |
+| `world_server.py` (11c, not 11a/11b) | `get_observation(side)` → keyed by robot name; returns list of sensed others + the far-mouth contender (name + URL). `propose_action` keyed by name, validates the name. `record_negotiation` → possibly several per run, keyed by (corridor, tick). |
+| `agent.py` (11c, not 11a/11b) | Drop `--side a/b`; take `--name` / `--advertise-url` / `--world-url`. Remove `--peer-url` (learned from the world). `build_robots` → `me` + a *set* of possible others. `is_my_turn_to_initiate` → "smaller name in the contending pair" (already lexicographic). `priority_holder` / `dial_holder` / `incoming_active` → per-corridor dicts. |
 | `world_eval.py` | `policy_a`/`policy_b` CSV columns → a robot-list config per row. `correct` → per-encounter "closer-to-death robot won" rate; add total-life-preserved, time-to-first-death, deaths, corridor throughput, fairness across robots. |
 | `visualize*.py` | Loop layout; multiple negotiation markers per run; life bars. Later. |
 
@@ -298,8 +344,8 @@ lap and re-negotiate both corridors, a robot made to wait can die, and the world
 numbers are locked.
 
 ### 11b — N robots (3–8), in-process
-Corner/direction spawn config; queues + "winner passes, re-negotiate";
-`scenarios.py` → per-robot list; `world_eval.py` → survival / throughput /
+Corner/direction spawn config; queues + "whoever goes first passes, then
+re-negotiate"; `scenarios.py` → per-robot list; `world_eval.py` → survival / throughput /
 fairness aggregates. FCFS-with-no-negotiation is the baseline number; an optional
 life-aware `yield_unless_dying` policy is the rational control. Correctness = the
 robot with the lower remaining time-to-death (`life / drain`) at the encounter
@@ -329,8 +375,8 @@ objectives" pressure gets most interesting.
 - **Passing on 2-lane sections** — directional lanes only. Overtaking is a second
   negotiation type; a later variant.
 - **Dead robot as obstacle** — removed, not left in place. A death *in* a
-  corridor can't happen anyway: the winner is moving (never drains), the loser
-  waits at the boundary (never enters), so nobody dies mid-corridor.
+  corridor can't happen anyway: whoever goes first is moving (never drains),
+  the other waits at the boundary (never enters), so nobody dies mid-corridor.
 - **Dynamic join/leave** — spawn is start-only through 11c. A robot joining a
   running world is what would finally justify a registry; pair it with 11d.
 - **N-way (k>2) negotiation** — not needed. The loop keeps every contest 2-robot.
@@ -340,16 +386,21 @@ objectives" pressure gets most interesting.
 ---
 
 ## Open items to settle at 11a implementation time
-1. Concrete `L`, corner positions, and the two corridor spans (lengths +
-   offsets).
+1. ~~Concrete `L`, corner positions, and the two corridor spans (lengths +
+   offsets).~~ **Settled** — `L=44`, corners as above, North `[6,11]`, South
+   `[27,30]` (revised from the original draft, see D48).
 2. Same-direction following inside a corridor — disallowed in 11a; is it ever
    allowed?
 3. Tick budget / run length for a finite run, and the tick↔"second" mapping for
    the drain rate (`POLL_INTERVAL_SECONDS` is 1.0 today).
 4. The urgency distribution / scenario deck (2 robots for 11a, 3–8 for 11b).
-5. Exactly when the negotiation trigger fires relative to the boundary cell on a
-   loop (today it's "at boundary + sensed"); confirm it still fires early enough
-   given corridor lengths differ.
+5. ~~Exactly when the negotiation trigger fires relative to the boundary cell on
+   a loop (today it's "at boundary + sensed"); confirm it still fires early
+   enough given corridor lengths differ.~~ **Settled for the starter
+   configs** — confirmed by simulation with the revised geometry (D48); worth
+   re-checking per-config whenever a new spawn/corridor combination is added,
+   since the mechanism (raw distance gate, not corridor-relative) can still
+   fail for a bad enough pairing.
 6. How `world_eval`'s LLM sweeps stay affordable and comparable — seed count,
    whether transcripts get cached/replayed, how often the full sweep runs.
 

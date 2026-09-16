@@ -1977,3 +1977,114 @@ new image built and pushed, `world`/`robot-a`/`robot-b` all redeployed
 with unchanged startup args (only the image changed) - `robot-a`/`robot-b`
 don't import `world.py` directly, only `world_server.py` needed the new
 constants, but all three were rebuilt from the same image for consistency.
+
+## D48 — Phase 9 superseded by Phase 11: the loop ("the O")
+
+**Decided:** `PLAN.md` §5's Phase 9 ("Three or more robots — DEFERRED") is
+superseded, not merely un-deferred. Instead of the originally-scoped bundle
+(a `world.py` rewrite plus a real N-way-negotiation design fork plus
+discovery/broadcast infra), the world becomes a **loop** - a rectangular
+track with directional lanes and two 1-lane pinch-point corridors. Full
+design in `docs/PHASE_11_ROADMAP.md` (kept standalone rather than inlined
+here - it's long, and each sub-phase needs its own implementation plan
+anyway). This becomes **Phase 11**; the old "Phase 11+" protocol
+experiments (cost of communication, individual scoring, killing a robot
+mid-negotiation, refusing to disclose, reputation) are renumbered **Phase
+12+** - they were always meant to run *on* a real multi-robot world, and
+the loop is what finally makes one buildable.
+
+**Why the loop dissolves the N-way problem:** on a line, a third robot
+needs an ordering with no central coordinator - a genuinely different
+negotiation shape. On a loop with directional lanes, opposing traffic on a
+2-lane stretch never conflicts by construction, so **every real conflict
+is still exactly two robots at one 1-lane corridor** - the pairwise
+`negotiate()` engine, the `{intent, goes_first, text}` message schema, A2A,
+and `wire.py` all survive untouched. The world absorbs the N-way part
+(many robots circulating, queuing at corridor mouths); the negotiation
+protocol never has to.
+
+**Why discovery drops the registry:** the world already knows every
+robot's position (it always has, since D17). `get_observation` can just
+return the contender at a corridor's far mouth - name and advertise-URL -
+directly. No Firestore registry, no Pub/Sub. This revises `PLAN.md` §9's
+infra assumptions for the deployed path (11c): discovery was assumed to
+need broadcast infra specifically because point-to-point A2A can't do it
+alone, but "ask the world who's there" was available the whole time once
+the world already models every position centrally.
+
+**The life / urgency / death mechanic:** every robot starts at `life=100`
+and drains `urgency` points per tick **only while held by a *resolved*
+corridor contest** - after a negotiation concludes and this robot is the
+one waiting (or queued behind such a robot). The negotiation itself is
+free - LLM latency is real time but not a modeled cost, since it's an
+artifact of the policy, not the physics. A deadlock still counts as
+"resolved" (both sides then drain), so a standoff is lethal, not free.
+Life hits 0 → removed from the world, no replenishment - survival is the
+metric, and the design deliberately punishes both losing negotiations and
+over-accommodating (a robot that never yields never loses life either).
+
+**The deterministic-policy convention changes for Phase 11.** Collision
+safety stays covered by policy-free `reactive_filter`/`step` unit tests
+(fast, free, unchanged in kind from every phase before this). But the life/
+urgency/death mechanic can't be exercised by the classic scripted policies
+(`stubborn`, `always_yield`, `never_yield`) - they don't read `life` or
+`drain` at all. From 11a on, the meaningful test of "does the survival
+mechanic work" needs a real LLM policy (Claude or Gemini) reasoning about
+quantified stakes. Scripted policies don't disappear - they stay the FCFS-
+equivalent baseline and the adversary for `run.py`/eval work - but they
+drop off the critical path for verifying Phase 11 itself.
+
+**Would change our mind:** if same-direction corridor contention (robots
+queuing to follow each other through one corridor, disallowed in 11a) or
+dynamic join/leave (a robot joining a running world) turn out to matter
+earlier than planned, the registry/broadcast infra `PLAN.md` §9 originally
+assumed comes back - the loop framing removes the *need* for it at 2-8
+robots with fixed spawns, not the possibility that a later requirement
+resurrects it.
+
+**D47 note:** the corridor geometry in `PHASE_11_ROADMAP.md` was revised
+before any code was written, during this session's design review - the
+original draft (`North [8,13]`, `South [25,28]`) reproduced the exact D47
+failure mode (an approach-room asymmetry large enough to outrun a fixed
+`SENSOR_RANGE`, so one direction's robot sails through a corridor solo
+before the other is ever sensed) on the flagship `duel` starter config's
+very first crossing. Confirmed by simulation, not just re-derived
+arithmetic. Fixed by adopting a shift (`North [6,11]`, `South [27,30]`)
+that `PHASE_11_ROADMAP.md`'s own "Known tight spots" section had already
+proposed as a fallback for a different, unrelated concern - both problems
+turned out to share one fix. See `docs/PHASE_11_ROADMAP.md` for the full
+geometry table and the simulation that confirms it.
+
+**File-layout note (decided at 11a's start, before any code):** 11a lands
+as **new files alongside the untouched linear-grid ones** - `src/loop_world.py`
+and `loop_simulate.py`, not an in-place rewrite of `src/world.py`/
+`simulate.py`, even though the roadmap's original file-change table (written
+before implementation) described it as a "core rewrite." Rejected the
+literal in-place rewrite because `world_server.py`/`world_store.py`/
+`agent.py` and the currently-deployed three-Cloud-Run-Service pipeline all
+import directly from today's `world.py` and none of them get touched until
+11c - rewriting it now would red-line `test_world_store.py`/
+`test_world_server.py` and leave the deployed services broken for the whole
+11a/11b window, purely because 11a and 11c happen to share a module name
+today. The old linear module retires at 11c, when `world_server.py`/
+`agent.py` actually get rewired to the loop - a real migration at that
+point, not a parallel-maintenance tax accepted indefinitely before then.
+See `docs/PHASE_11_ROADMAP.md`'s "What stays vs what changes" section for
+the revised file table.
+
+**No "winner" (decided during 11a step 2, before step 3):** the per-corridor
+negotiation outcome was first built as `CorridorContest.winner` - direct
+carryover of world.py's `priority` naming. Caught in review: a "winner" is
+the wrong frame entirely. Going first through one corridor decides nothing
+about how either robot is actually doing - the urgent robot going first
+might still be the one closer to death, and the one that yielded might
+outlast it by a wide margin. Renamed throughout `loop_world.py` (and the
+roadmap's own prose): `CorridorContest.winner` → `goes_first` (a procedural
+fact - whose turn is it), `winner_entered` → `entered`. The only real
+"result" this module recognizes is **survival** - a new `WorldState.tick` /
+`died_at` + `survival_result(state)` report ticks-alive per robot; there is
+no declared winner anywhere, not even at the whole-run level. A caller
+comparing `survival_result`'s numbers is free to call the longer-lived one
+"the result," but `loop_world.py` itself only reports, it doesn't judge.
+This matches `PLAN.md` §9's own framing: survival, not victory, is Phase
+11's metric.
