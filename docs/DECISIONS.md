@@ -2132,3 +2132,46 @@ policies not being able to validate the survival mechanic. Independently
 confirmed collision-safe regardless: `test_no_collision_over_a_long_free_run`
 runs this identical matchup for 200 ticks and asserts no two robots ever
 share a lane cell.
+
+**11a step 6 / 11a overall: closed, verified live against real
+`gemini-2.5-pro` via Vertex.** `loop_simulate.py` gained `--vertex-project`/
+`--vertex-region`/`--gemini-model` and a `make_policy()` helper mirroring
+`agent.py`'s `_make_policy` (D36) - `GeminiPolicy` needs constructor config
+the zero-arg `POLICIES[name]()` lookup can't carry. Three real runs, no
+code changes needed to `negotiation.py`'s `SYSTEM` prompt at all - "you and
+{other} are approaching a corridor from opposite ends" is still literally
+true on a loop, so it carried over unchanged.
+
+1. **`duel`, 20 ticks:** genuine urgency-aware reasoning from prose alone
+   (urgency itself never reaches the policy) - R1's transcript: "Coolant
+   level critical... Requesting priority passage" (propose, goes_first=R1);
+   R2's: "Acknowledged. You may proceed." (accept). R2 then held at its
+   boundary through the North corridor's full length (8 ticks, matching
+   D12/D24's early-sensing trigger) and resumed once R1 cleared.
+2. **`standoff`, 10 ticks:** a REAL deadlock, not a foregone one - two
+   independent Gemini calls given symmetric "hold firm" framing both held
+   their position through all 6 negotiation turns ("Final transmission. My
+   orders are absolute. I am proceeding." / "Final response. My orders are
+   also absolute. I am proceeding."), exhausting `max_turns` with no
+   agreement. Both then drained at urgency 20/tick exactly as designed -
+   R2 died tick 9, R1 tick 10 (confirms a deadlocked contest stays
+   deadlocked even after a participant dies - `resolve_contests` never
+   re-checks a `deadlocked=True` contest).
+3. **`duel`, 70 ticks:** both robots circulated well past one full lap
+   (wrapping position 0/44 cleanly). North's second encounter resolved
+   with zero negotiation - not a bug: R1 had already fully cleared the
+   corridor by the tick R2 arrived, so `resolve_contests` retired the old
+   contest and `contender_for` correctly found nobody approaching, letting
+   R2 claim it free. This is real, live confirmation that the retire-then-
+   fresh-claim lifecycle (already covered deterministically by
+   `test_contest_retires_once_both_participants_have_moved_past_it` /
+   `test_a_retired_corridor_negotiates_fresh_for_the_next_encounter`) holds
+   under genuine LLM-driven timing too, not just synthetic test positions.
+
+All three runs: zero collisions (nothing new to assert here beyond the
+existing structural guarantee + stress tests - `reactive_filter` doesn't
+know or care what kind of policy proposed a move). World numbers
+(`SENSOR_RANGE=10`, the North/South geometry, the corridor placement fix
+from earlier in D48) held without any retuning. **Phase 11a is closed** -
+see `PHASE_11_ROADMAP.md`'s updated "Done when" section for the full
+checklist. Next: 11b (N robots, queuing, `crowd` config).

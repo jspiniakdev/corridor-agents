@@ -441,20 +441,42 @@ the registry too - the world already knows every position, so it just
 tells an approaching robot who's at the far mouth. Full design:
 `docs/PHASE_11_ROADMAP.md`. Rationale: D48.
 
-**Phase 11 — in progress, starting with 11a (loop world, 2 LLM robots,
-in-process).** The corridor geometry in the roadmap was revised before any
-code was written: the original draft (`North [8,13]`, `South [25,28]`)
-reproduced the exact D47 failure mode - simulated live, the flagship
-`duel` starter config's first North crossing skipped negotiation entirely,
-because the near robot's 2-cell approach outran the far robot's 7-cell
-approach before either came within `SENSOR_RANGE`. Fixed by adopting
-`North [6,11]` / `South [27,30]`, a shift the roadmap had already floated
-as a fallback for an unrelated concern. See D48.
+**Phase 11a — done.** The corridor geometry in the roadmap was revised
+before any code was written: the original draft (`North [8,13]`, `South
+[25,28]`) reproduced the exact D47 failure mode - simulated live, the
+flagship `duel` starter config's first North crossing skipped negotiation
+entirely, because the near robot's 2-cell approach outran the far robot's
+7-cell approach before either came within `SENSOR_RANGE`. Fixed by
+adopting `North [6,11]` / `South [27,30]`, a shift the roadmap had already
+floated as a fallback for an unrelated concern.
 
-**Next:** Phase 11a implementation - the `world.py` core rewrite (loop
-coordinates, directional lanes, two corridors, generalised
-`reactive_filter`, continuous run, life/urgency/death). See `PLAN.md` §5
-and `docs/PHASE_11_ROADMAP.md` for the full spec and sub-phase breakdown.
+Built as new files alongside `world.py`, not a rewrite of it (D48's
+file-layout note - `world_server.py`/`world_store.py`/`agent.py` and the
+deployed pipeline don't change until 11c): `src/loop_world.py` (geometry,
+lanes, corridors, `reactive_filter`, per-corridor `CorridorContest` that
+retires and re-negotiates fresh, life/urgency/death - no "winner" concept,
+`survival_result()` reports ticks-alive per robot), `src/loop_scenarios.py`
+(`duel`/`standoff` starter configs), `src/loop_observation.py` (loop-aware
+observation, reusing `negotiation.py`'s `SYSTEM` prompt unchanged - "you're
+approaching a corridor from opposite ends" is still literally true on a
+loop), `loop_simulate.py` (the driver, `--policy gemini` wired the same
+way `agent.py` does).
+
+**Live-verified against real `gemini-2.5-pro` via Vertex**, not just
+deterministic-policy tests: `duel` shows genuine urgency-aware reasoning
+from prose alone (R1: "Coolant level critical... Requesting priority
+passage"; R2: "Acknowledged. You may proceed.") with the correct
+early-sensing yield/resume cycle; `standoff` produced a real 6-turn
+deadlock (both sides genuinely held "hold firm," not a foregone
+conclusion) and both robots drained to death exactly on schedule; a
+70-tick `duel` run circulated past both corridors multiple times,
+confirming the retire-then-fresh-claim contest lifecycle live, not just
+in unit tests. See D48 for the full record.
+
+**Next:** Phase 11b - N robots (3-8), corner/direction spawn config,
+queuing (`crowd` starter config), `world_eval.py`-equivalent survival/
+throughput/fairness aggregates. See `PLAN.md` §5 and
+`docs/PHASE_11_ROADMAP.md` for the full spec and sub-phase breakdown.
 
 ## How to run things
 

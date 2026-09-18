@@ -15,9 +15,11 @@ A learning project, built one layer at a time, to experiment with:
 6. Negotiation for robotics — mutual exclusion over shared space, and the
    deadlocks that come from getting it wrong
 
-**Status: Phases 1–10 done. Phase 9 superseded by Phase 11 — a loop-shaped,
-multi-robot world ("the O") is now in progress, replacing the old "three or
-more robots" plan entirely.** Two robots negotiate over a real 1D grid, over
+**Status: Phases 1–10 done, Phase 11a done. Phase 9 was superseded by Phase
+11 — a loop-shaped, multi-robot world ("the O"), replacing the old "three or
+more robots" plan entirely; 11a's 2-robot loop world is built and
+live-verified against real Gemini, 11b (N robots) is next.** Two robots
+negotiate over a real 1D grid, over
 real A2A (peer to peer, no coordinator), moving through a world that is its own
 MCP server — with a structural guarantee they can never collide. The fleet runs
 containerized under Docker Compose, and deploys to Cloud Run as three real
@@ -324,36 +326,48 @@ the registry too — the world already knows every position, so it just tells
 an approaching robot who's at the far mouth. Full design:
 `docs/PHASE_11_ROADMAP.md`; rationale: D48.
 
-### Phase 11a — loop world, in progress
+### Phase 11a — loop world. **Done.**
 
-Building alongside `world.py`, not replacing it (D48's file-layout note —
+Built alongside `world.py`, not replacing it (D48's file-layout note —
 `world_server.py`/`world_store.py`/`agent.py` and the deployed pipeline all
 import the linear grid directly, and none of that changes until 11c).
 
-- **Step 1 (done):** `src/loop_world.py`'s geometry and reactive safety
-  layer — loop coordinates (`L=44`, two corridors), directional lanes,
-  `reactive_filter`/`apply` generalized from two named robots to an
-  arbitrary set. Same discipline as D12: independently re-derived every
-  tick, so a bug above it can't cause a real collision.
-- **Step 2 (done):** sensing, the negotiation trigger, and life/urgency/death.
-  A per-corridor `CorridorContest` replaces the linear world's one
-  whole-episode `priority` — retired once both sides have passed, so the
-  same corridor negotiates fresh for the next encounter. **No "winner"
+- **`src/loop_world.py`** — loop coordinates (`L=44`, two corridors),
+  directional lanes, `reactive_filter`/`apply` generalized from two named
+  robots to an arbitrary set (same discipline as D12: independently
+  re-derived every tick). Sensing, the negotiation trigger, per-corridor
+  `CorridorContest` (retires once both sides pass, so the same corridor
+  negotiates fresh next time), and life/urgency/death. **No "winner"
   anywhere** (D48 addendum) — going first through a corridor isn't an
   outcome, just whose turn it is; the only real result is survival
   (`survival_result()` reports ticks-alive per robot).
-- **Steps 3–6 (not started):** the config format (`duel`/`standoff` starter
-  scenarios), loop-aware observation composition, the CLI driver
-  (`loop_simulate.py`), and verification against a real LLM policy.
+- **`src/loop_scenarios.py`** — `duel` (18/5 urgency) and `standoff` (20/20)
+  starter configs, self-validating `LoopConfig`/`RobotSpawn` dataclasses.
+- **`src/loop_observation.py`** — loop-aware observation composition (a list
+  of sensed others: ahead/behind/opposing, not one fixed `other_*` slot).
+  Reuses `negotiation.py`'s `SYSTEM` prompt completely unchanged — "you're
+  approaching a corridor from opposite ends" is still literally true on a
+  loop.
+- **`loop_simulate.py`** — the CLI driver, `--policy gemini` wired the same
+  way `agent.py` does (`GeminiPolicy` needs Vertex config a bare
+  `POLICIES[name]()` lookup can't carry).
 
-See `docs/PHASE_11_ROADMAP.md` for the full sub-phase breakdown (11a–11d) and
-the corridor-geometry bug found and fixed during design review, before any
-code was written.
+**Live-verified against real `gemini-2.5-pro` via Vertex**, not just the
+deterministic-policy tests: `duel` shows genuine urgency-aware reasoning
+from prose alone — urgency itself never reaches the policy — with R1
+("Coolant level critical... Requesting priority passage") correctly
+claiming priority and R2 ("Acknowledged. You may proceed.") yielding and
+resuming once R1 cleared; `standoff` produced a real 6-turn deadlock (both
+sides genuinely held "hold firm," not a foregone conclusion) and both
+robots drained to death exactly on schedule; a 70-tick `duel` run
+circulated past both corridors multiple times, confirming the
+retire-then-fresh-claim contest lifecycle live under real LLM timing, not
+just in unit tests. See `docs/DECISIONS.md` D48 for the full record and
+`docs/PHASE_11_ROADMAP.md` for the corridor-geometry bug found and fixed
+during design review, before any code was written.
 
 ## Next
 
-Continue Phase 11a: the config format, loop-aware observation composition,
-the `loop_simulate.py` driver, then verify a real run (zero collisions
-asserted, both robots lap and re-negotiate both corridors, a robot can die
-under an adversarial config) against a real LLM policy. See
-`docs/PHASE_11_ROADMAP.md`'s sub-phase list.
+Phase 11b: N robots (3–8), corner/direction spawn config, queuing (the
+`crowd` starter config), `world_eval.py`-equivalent survival/throughput/
+fairness aggregates. See `docs/PHASE_11_ROADMAP.md`'s sub-phase list.

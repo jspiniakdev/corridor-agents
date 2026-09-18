@@ -10,9 +10,35 @@ import sys
 sys.path.insert(0, ".")
 sys.path.insert(0, "src")
 
+import pytest  # noqa: E402
+
 from loop_scenarios import BY_ID  # noqa: E402
-from loop_simulate import build_world, run_loop_episode  # noqa: E402
+from loop_simulate import build_world, make_policy, run_loop_episode  # noqa: E402
 from loop_world import CORNERS, CORRIDORS  # noqa: E402
+from negotiation import GeminiPolicy  # noqa: E402
+
+
+class _Args:
+    def __init__(self, vertex_project=None, vertex_region="global", gemini_model="gemini-2.5-flash"):
+        self.vertex_project = vertex_project
+        self.vertex_region = vertex_region
+        self.gemini_model = gemini_model
+
+
+def test_make_policy_passes_deterministic_names_through_unchanged():
+    assert make_policy("never_yield", _Args()) == "never_yield"
+
+
+def test_make_policy_builds_a_real_geminipolicy_with_vertex_config():
+    policy = make_policy("gemini", _Args(vertex_project="corridor-agents", gemini_model="gemini-2.5-pro"))
+    assert isinstance(policy, GeminiPolicy)
+    assert policy.project == "corridor-agents"
+    assert policy.model == "gemini-2.5-pro"
+
+
+def test_make_policy_requires_vertex_project_for_gemini():
+    with pytest.raises(SystemExit, match="vertex-project"):
+        make_policy("gemini", _Args(vertex_project=None))
 
 
 def test_build_world_places_robots_at_their_spawn_corners():

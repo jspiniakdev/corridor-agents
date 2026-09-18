@@ -332,16 +332,30 @@ whether the survival mechanic works. `world.py`'s collision safety is covered by
 **policy-free** `reactive_filter` / `step` unit tests, so the suite stays fast
 and free regardless.
 
-### 11a — loop world, 2 LLM robots, in-process
-The `world.py` rewrite (loop coords, lanes, two corridors, generalised
-`reactive_filter`, continuous run, life / urgency / death), driven by two Claude
-or Gemini robots. `SYSTEM` reframed for the loop; `observation.py` loop-aware.
-**This is the world-refinement phase** — corridor placement, drain / `life` /
-run-length, sensor lead-time and the drain-start choice all get tuned against
-what real negotiations do here.
-**Done when:** a full run completes with zero collisions (asserted), both robots
-lap and re-negotiate both corridors, a robot made to wait can die, and the world
-numbers are locked.
+### 11a — loop world, 2 LLM robots, in-process. **DONE.**
+Built as new files alongside `world.py`, not a rewrite of it (D48's file-layout
+note): `src/loop_world.py` (loop coords, lanes, two corridors, generalised
+`reactive_filter`, continuous run, life/urgency/death), `src/loop_scenarios.py`
+(the `duel`/`standoff` starter configs), `src/loop_observation.py` (loop-aware,
+reused unchanged - no separate `SYSTEM` prompt needed, `negotiation.py`'s is
+provider-agnostic already), `loop_simulate.py` (the driver).
+
+**Done when** (all confirmed, live, against real `gemini-2.5-pro` via Vertex -
+not just the deterministic-policy tests): a full run completes with zero
+collisions (asserted structurally by `reactive_filter`, and directly in
+`test_loop_world.py`/`test_loop_simulate.py`'s stress tests); both robots lap
+and re-negotiate both corridors (a 70-tick `duel` run circulated past both
+corridors multiple times, wrapping the loop - the second North encounter
+resolved via the same retire-then-fresh-claim path the deterministic tests
+already covered, observed live under real LLM timing this time); a robot made
+to wait can die (`standoff`: both Geminis genuinely held "hold firm" through
+all 6 negotiation turns - a real deadlock, not a foregone one - then both
+drained to death exactly on schedule); the `llm.respond` transcripts show
+quantified-stakes reasoning (`duel`: R1 reasoned "coolant critical" into
+claiming priority, R2 reasoned "no fixed deadline" into yielding - from prose
+alone, urgency itself stays hidden from the policy throughout). World numbers
+(`SENSOR_RANGE=10`, corridor geometry, `MIN_MOVE`-equivalent pacing) held
+without retuning. See `docs/DECISIONS.md` D48 for the full verification record.
 
 ### 11b — N robots (3–8), in-process
 Corner/direction spawn config; queues + "whoever goes first passes, then

@@ -1,13 +1,13 @@
 # Corridor Agents — Project Plan
 
 *A learning project in multi-agent robotics coordination.*
-*Last updated: 2026-09-10 · Status: Phases 1–10 done (Phase 8's Claude-on-
+*Last updated: 2026-09-18 · Status: Phases 1–10 done (Phase 8's Claude-on-
 Vertex path permanently dropped - quota request declined outright,
 `--policy gemini` is the working substitute, not a stopgap). Phase 9
-superseded by Phase 11 (D48) - see below. Phase 11 in progress, starting
-with 11a; full design in `docs/PHASE_11_ROADMAP.md`. See `docs/DECISIONS.md`
-D1–D48 for the real record; this file is the north-star plan, kept roughly
-current.*
+superseded by Phase 11 (D48) - see below. Phase 11a done, live-verified
+against real Gemini; 11b (N robots, queuing) next. Full design in
+`docs/PHASE_11_ROADMAP.md`. See `docs/DECISIONS.md` D1–D48 for the real
+record; this file is the north-star plan, kept roughly current.*
 
 ---
 
@@ -441,7 +441,7 @@ Split into sub-phases because 10b turned out to be three separate pieces:
 
 ### Phase 11 — The "O": a continuous, multi-robot corridor world
 
-**In progress. Full design: `docs/PHASE_11_ROADMAP.md`. Rationale: D48.**
+**11a done. Full design: `docs/PHASE_11_ROADMAP.md`. Rationale: D48.**
 
 Supersedes Phase 9. A rectangular loop, directional lanes, two asymmetric
 1-lane corridors - every genuine conflict stays a pairwise negotiation, the
@@ -450,14 +450,21 @@ death survival mechanic (drain only while held by a *resolved* corridor
 contest; the negotiation itself is free) - this is the setting the old
 "Phase 11+" protocol experiments always assumed but never had.
 
-- **11a — loop world, 2 LLM robots, in-process.** The `world.py` core
-  rewrite: loop coordinates, directional lanes, two corridors, generalised
-  `reactive_filter`, continuous run (no episode terminus), life/urgency/
-  death. Corridor geometry settled (`North [6,11]`, `South [27,30]` - a
-  revision from the original draft, see D48's note). **Done when:** a full
-  run completes with zero collisions (asserted), both robots lap and
-  re-negotiate both corridors, a robot made to wait can die, and the world
-  numbers are locked.
+- **11a — loop world, 2 LLM robots, in-process. DONE.** New files alongside
+  `world.py`, not a rewrite of it (D48's file-layout note): `src/loop_world.py`
+  (loop coordinates, directional lanes, two corridors, generalised
+  `reactive_filter`, continuous run, life/urgency/death - no "winner" concept,
+  `survival_result()` reports ticks-alive), `src/loop_scenarios.py`
+  (`duel`/`standoff` starter configs), `src/loop_observation.py` (loop-aware
+  observation), `loop_simulate.py` (the driver). Corridor geometry settled
+  (`North [6,11]`, `South [27,30]` - a revision from the original draft, see
+  D48's note). **Done when** (confirmed live against real `gemini-2.5-pro`):
+  a full run completes with zero collisions (asserted structurally + stress-
+  tested); both robots lap and re-negotiate both corridors (a 70-tick `duel`
+  run circulated past both corridors multiple times); a robot made to wait
+  can die (`standoff`: a real 6-turn deadlock, both Geminis genuinely held
+  firm, both drained to death on schedule); the world numbers held without
+  retuning. See D48 for the full verification record.
 - **11b — N robots (3–8), in-process.** Corner/direction spawn config,
   queuing + "winner passes, re-negotiate", survival/throughput/fairness
   aggregates in `world_eval.py`. **Done when:** an 8-robot run resolves
