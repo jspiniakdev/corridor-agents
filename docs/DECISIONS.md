@@ -2103,3 +2103,32 @@ framing - not corners. Built `standoff` reusing `duel`'s corners, so the
 pair still meets at a real corridor; flagged as an assumption in both the
 code comment and the loop-diagram artifact ("The O"), not silently
 decided. Would revisit if the user specifies different corners.
+
+**loop_simulate.py (11a step 5): both starter configs live-verified on the
+first real run, no bugs found.** `duel` (`--a never_yield --b
+always_yield`) reproduced the early-sensing crossing exactly as the
+geometry review predicted before any code existed: R2 (TR/CCW) senses R1
+from a distance and yields at tick 5, before R1 has even reached its own
+boundary - the D12 early-trigger design working end to end through the
+full `loop_world`/`loop_observation`/`negotiation` stack, not just the
+unit-level pieces each already had coverage for. `standoff` (`--a
+never_yield --b never_yield`) deadlocked and both sides drained to death
+exactly as PHASE_11_ROADMAP.md's own stated hypothesis - confirmed a
+deadlocked contest never un-deadlocks even after one side dies (matches
+"a deadlocked negotiation counts as concluded", not re-checked once a
+participant is gone).
+
+One result worth recording as expected, not a bug: a `stubborn`-vs-
+`stubborn` `duel` run let R1 (urgency 18, the "should usually win"
+robot) lose the negotiation and drain to death. `stubborn` (like every
+scripted policy) never reads urgency or situation text at all - confirmed
+by grep, zero `.urgency` references anywhere in `negotiation.py`'s
+scripted policies - so a scripted-policy matchup proves collision safety
+and mechanics, never "does the urgent robot win." That needs an
+urgency-aware policy (LLM, 11a step 6, or 11b's optional
+`yield_unless_dying` control) - exactly what
+`PHASE_11_ROADMAP.md`'s "Sub-phases" section already says about scripted
+policies not being able to validate the survival mechanic. Independently
+confirmed collision-safe regardless: `test_no_collision_over_a_long_free_run`
+runs this identical matchup for 200 ticks and asserts no two robots ever
+share a lane cell.
